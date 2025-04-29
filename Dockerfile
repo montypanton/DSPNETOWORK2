@@ -1,10 +1,10 @@
-FROM rust:1.68 as builder
+FROM rust:1.75 as builder
 
 WORKDIR /usr/src/secnet
 COPY . .
 
 # Build the server application
-RUN cargo build --release --bin secnet-server
+RUN cargo build --release --bin secnet
 
 FROM debian:bullseye-slim
 
@@ -15,7 +15,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the binary from builder
-COPY --from=builder /usr/src/secnet/target/release/secnet-server /usr/local/bin/secnet-server
+COPY --from=builder /usr/src/secnet/target/release/secnet /usr/local/bin/secnet-server
 
 # Create a non-root user to run the server
 RUN groupadd -r secnet && useradd -r -g secnet secnet

@@ -173,3 +173,4 @@ pub async fn execute(matches: &ArgMatches, config: &Config) -> Result<(), Box<dy
     }
     
     Ok(())
+}
