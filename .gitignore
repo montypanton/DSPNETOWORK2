@@ -1,1 +1,53 @@
-/target
+# Rust build and dependencies
+/target/
+**/*.rs.bk
+
+# If you're using Cargo workspaces
+**/target/
+
+# Executables (if built outside target/)
+*.exe
+*.dll
+*.so
+*.dylib
+*.bin
+*.out
+
+# Backup and swap files
+*~
+*.swp
+*.swo
+*.bak
+
+# Logs
+*.log
+
+# IDEs and editors
+# VSCode
+.vscode/
+
+# JetBrains IDEs (IntelliJ, CLion, etc.)
+.idea/
+*.iml
+
+# Sublime
+*.sublime-workspace
+*.sublime-project
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Linux
+*.trash
+*~
+
+# Git-related
+*.orig
+
+# Misc
+/tests/output/  # if your tests generate output
