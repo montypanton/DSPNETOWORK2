@@ -1,22 +1,38 @@
-use actix_web::{get, post, web, HttpResponse};
-use log::{debug, error, info};
+use actix_web::{get, post, web, HttpResponse, HttpRequest};
+use log::{info};
 use sqlx::PgPool;
 use uuid::Uuid;
+use sha2::{Sha256, Digest};
 
 use crate::db;
 use crate::error::ServerError;
 use crate::models::{SendTopicMessageRequest, SendMessageResponse, TopicCreateResponse, TopicListResponse, TopicSubscribeRequest};
 
+// Helper function to extract token from Authorization header
+fn extract_token(req: &HttpRequest) -> Result<&str, ServerError> {
+    let auth_header = req.headers().get("Authorization")
+        .ok_or(ServerError::AuthenticationError)?;
+        
+    let auth_str = auth_header.to_str()
+        .map_err(|_| ServerError::AuthenticationError)?;
+        
+    if !auth_str.starts_with("Bearer ") {
+        return Err(ServerError::AuthenticationError);
+    }
+    
+    Ok(auth_str.trim_start_matches("Bearer ").trim())
+}
+
 // Create a new topic
 #[post("/topics")]
 pub async fn create_topic(
     pool: web::Data<PgPool>,
-    auth: web::Header<String>,
+    req: HttpRequest,
 ) -> Result<HttpResponse, ServerError> {
     info!("Received topic creation request");
     
     // Extract token from Authorization header
-    let token = auth.trim_start_matches("Bearer ").trim();
+    let token = extract_token(&req)?;
     
     // Verify token
     db::verify_connection_token(&pool, token).await?;
@@ -36,12 +52,12 @@ pub async fn create_topic(
 #[get("/topics")]
 pub async fn list_topics(
     pool: web::Data<PgPool>,
-    auth: web::Header<String>,
+    req: HttpRequest,
 ) -> Result<HttpResponse, ServerError> {
     info!("Received topic list request");
     
     // Extract token from Authorization header
-    let token = auth.trim_start_matches("Bearer ").trim();
+    let token = extract_token(&req)?;
     
     // Verify token
     db::verify_connection_token(&pool, token).await?;
@@ -61,15 +77,15 @@ pub async fn list_topics(
 #[post("/topics/{topic_hash}/subscribe")]
 pub async fn subscribe_topic(
     pool: web::Data<PgPool>,
-    auth: web::Header<String>,
+    req: HttpRequest,
     path: web::Path<String>,
-    req: web::Json<TopicSubscribeRequest>,
+    topic_req: web::Json<TopicSubscribeRequest>,
 ) -> Result<HttpResponse, ServerError> {
     let topic_hash_hex = path.into_inner();
     info!("Received subscription request for topic: {}", topic_hash_hex);
     
     // Extract token from Authorization header
-    let token = auth.trim_start_matches("Bearer ").trim();
+    let token = extract_token(&req)?;
     
     // Verify token
     db::verify_connection_token(&pool, token).await?;
@@ -85,14 +101,14 @@ pub async fn subscribe_topic(
     };
     
     // Verify topic hash matches
-    if req.topic_hash != topic_hash_hex {
+    if topic_req.topic_hash != topic_hash_hex {
         return Err(ServerError::BadRequestError {
             message: "Topic hash in body doesn't match URL".to_string(),
         });
     }
     
     // Subscribe to topic
-    db::subscribe_to_topic(&pool, &topic_id, &req.subscriber_token, &req.routing_data).await?;
+    db::subscribe_to_topic(&pool, &topic_id, &topic_req.subscriber_token, &topic_req.routing_data).await?;
     
     info!("Subscription successful");
     
@@ -106,14 +122,14 @@ pub async fn subscribe_topic(
 #[post("/topics/{topic_hash}/unsubscribe")]
 pub async fn unsubscribe_topic(
     pool: web::Data<PgPool>,
-    auth: web::Header<String>,
+    req: HttpRequest,
     path: web::Path<String>,
 ) -> Result<HttpResponse, ServerError> {
     let topic_hash_hex = path.into_inner();
     info!("Received unsubscribe request for topic: {}", topic_hash_hex);
     
     // Extract token from Authorization header
-    let token = auth.trim_start_matches("Bearer ").trim();
+    let token = extract_token(&req)?;
     
     // Verify token and get public key hash
     let public_key_hash = db::verify_connection_token(&pool, token).await?;
@@ -129,8 +145,8 @@ pub async fn unsubscribe_topic(
     };
     
     // Create subscriber token from public key hash (simplified)
-    let mut hasher = sha2::Sha256::new();
-    sha2::Digest::update(&mut hasher, &public_key_hash);
+    let mut hasher = Sha256::new();
+    hasher.update(&public_key_hash);
     let subscriber_token = hasher.finalize().to_vec();
     
     // Unsubscribe from topic
@@ -153,21 +169,21 @@ pub async fn unsubscribe_topic(
 #[post("/topics/{topic_hash}/messages")]
 pub async fn publish_topic(
     pool: web::Data<PgPool>,
-    auth: web::Header<String>,
+    req: HttpRequest,
     path: web::Path<String>,
-    req: web::Json<SendTopicMessageRequest>,
+    topic_req: web::Json<SendTopicMessageRequest>,
 ) -> Result<HttpResponse, ServerError> {
     let topic_hash_hex = path.into_inner();
     info!("Received publish request for topic: {}", topic_hash_hex);
     
     // Extract token from Authorization header
-    let token = auth.trim_start_matches("Bearer ").trim();
+    let token = extract_token(&req)?;
     
     // Verify token
     db::verify_connection_token(&pool, token).await?;
     
     // Verify topic hash matches
-    if req.topic_hash != topic_hash_hex {
+    if topic_req.topic_hash != topic_hash_hex {
         return Err(ServerError::BadRequestError {
             message: "Topic hash in body doesn't match URL".to_string(),
         });
@@ -187,14 +203,14 @@ pub async fn publish_topic(
     let message_id = Uuid::new_v4().as_bytes().to_vec();
     
     // Default expiry to 24 hours if not specified
-    let expiry = req.expiry.unwrap_or(86400);
+    let expiry = topic_req.expiry.unwrap_or(86400);
     
     // Store topic message
     db::store_topic_message(
         &pool,
         &topic_id,
         &message_id,
-        &req.encrypted_content,
+        &topic_req.encrypted_content,
         expiry,
     ).await?;
     

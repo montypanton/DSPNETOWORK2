@@ -7,13 +7,8 @@ use sqlx::postgres::PgPoolOptions;
 use std::env;
 use std::time::Duration;
 
-mod api;
-mod auth;
-mod db;
-mod error;
-mod message;
-mod models;
-mod topic;
+// Use lib.rs exports
+use secnet_server::{configure_api, error::ServerError};
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -46,9 +41,10 @@ async fn main() -> std::io::Result<()> {
     
     info!("Database connection established");
     
-    // Run migrations if needed (omitted for brevity)
+    // Run migrations if needed (uncomment when needed)
+    // sqlx::migrate!("./migrations").run(&db_pool).await.expect("Failed to run migrations");
     
-    // Set up scheduled tasks
+    // Set up scheduled tasks for maintenance
     let pool_clone = db_pool.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(3600)); // Every hour
@@ -93,7 +89,7 @@ async fn main() -> std::io::Result<()> {
             .wrap(middleware::Compress::default())
             .wrap(cors)
             // Register API routes
-            .configure(api::configure)
+            .configure(configure_api)
     })
     .bind(("0.0.0.0", server_port))?
     .run()

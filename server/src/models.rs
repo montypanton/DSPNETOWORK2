@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use sqlx::types::chrono::{DateTime, Utc};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // Authentication models

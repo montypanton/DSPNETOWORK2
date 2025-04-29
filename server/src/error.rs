@@ -1,7 +1,6 @@
 use actix_web::{HttpResponse, ResponseError};
 use derive_more::{Display, Error};
 use sqlx::Error as SqlxError;
-use std::fmt;
 
 #[derive(Debug, Display, Error)]
 pub enum ServerError {

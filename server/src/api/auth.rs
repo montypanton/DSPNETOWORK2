@@ -1,5 +1,5 @@
 use actix_web::{get, post, web, HttpResponse, Responder};
-use log::{debug, error, info};
+use log::{info};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -48,12 +48,22 @@ pub async fn announce(
 #[post("/connection/refresh")]
 pub async fn refresh_token(
     pool: web::Data<PgPool>,
-    auth: web::Header<String>,
+    req: web::HttpRequest,
 ) -> Result<HttpResponse, ServerError> {
     info!("Received token refresh request");
     
     // Extract token from Authorization header
-    let token = auth.trim_start_matches("Bearer ").trim();
+    let auth_header = req.headers().get("Authorization")
+        .ok_or(ServerError::AuthenticationError)?;
+        
+    let auth_str = auth_header.to_str()
+        .map_err(|_| ServerError::AuthenticationError)?;
+        
+    if !auth_str.starts_with("Bearer ") {
+        return Err(ServerError::AuthenticationError);
+    }
+    
+    let token = auth_str.trim_start_matches("Bearer ").trim();
     
     // Verify existing token
     let public_key_hash = db::verify_connection_token(&pool, token).await?;
@@ -61,14 +71,15 @@ pub async fn refresh_token(
     // Generate new token
     let new_token = Uuid::new_v4().to_string();
     
-    // Update token in database - simplified for brevity
+    // Update token in database
     let token_uuid = Uuid::parse_str(&new_token).unwrap();
-    sqlx::query!(
-        "UPDATE public_keys SET connection_token = $1 WHERE public_key_hash = $2",
-        token_uuid,
-        public_key_hash
+    
+    sqlx::query(
+        "UPDATE public_keys SET connection_token = $1 WHERE public_key_hash = $2"
     )
-    .execute(&pool)
+    .bind(token_uuid)
+    .bind(public_key_hash)
+    .execute(&**pool)
     .await?;
     
     info!("Token refreshed successfully");

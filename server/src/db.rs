@@ -1,8 +1,8 @@
 use log::{debug, error, info};
 use sha2::{Digest, Sha256};
-use sqlx::{postgres::PgPool, types::Uuid, Error as SqlxError};
+use sqlx::{postgres::PgPool, Row};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use uuid::Uuid as UuidLib;
+use uuid::Uuid;
 
 use crate::error::ServerError;
 use crate::models::{Message, PreKeyBundle, Topic};
@@ -32,51 +32,49 @@ pub async fn store_public_keys(
     info!("Storing public keys for hash: {}", hex::encode(public_key_hash));
 
     // Convert connection token to UUID
-    let token_uuid = UuidLib::parse_str(connection_token)
+    let token_uuid = Uuid::parse_str(connection_token)
         .map_err(|e| ServerError::BadRequestError {
             message: format!("Invalid connection token: {}", e),
         })?;
 
     // Check if key already exists
-    let existing = sqlx::query!(
-        "SELECT public_key_hash FROM public_keys WHERE public_key_hash = $1",
-        public_key_hash
-    )
-    .fetch_optional(pool)
-    .await?;
+    let existing = sqlx::query("SELECT public_key_hash FROM public_keys WHERE public_key_hash = $1")
+        .bind(public_key_hash)
+        .fetch_optional(pool)
+        .await?;
 
     if existing.is_some() {
         // Update existing record
-        sqlx::query!(
+        sqlx::query(
             "UPDATE public_keys 
              SET ed25519_public_key = $2, 
                  x25519_public_key = $3, 
                  kyber_public_key = $4, 
                  connection_token = $5,
                  last_active = NOW()
-             WHERE public_key_hash = $1",
-            public_key_hash,
-            ed25519_public_key,
-            x25519_public_key,
-            kyber_public_key,
-            token_uuid
+             WHERE public_key_hash = $1"
         )
+        .bind(public_key_hash)
+        .bind(ed25519_public_key)
+        .bind(x25519_public_key)
+        .bind(kyber_public_key)
+        .bind(token_uuid)
         .execute(pool)
         .await?;
 
         info!("Updated public keys for existing hash");
     } else {
         // Insert new record
-        sqlx::query!(
+        sqlx::query(
             "INSERT INTO public_keys 
              (public_key_hash, ed25519_public_key, x25519_public_key, kyber_public_key, connection_token, last_active) 
-             VALUES ($1, $2, $3, $4, $5, NOW())",
-            public_key_hash,
-            ed25519_public_key,
-            x25519_public_key,
-            kyber_public_key,
-            token_uuid
+             VALUES ($1, $2, $3, $4, $5, NOW())"
         )
+        .bind(public_key_hash)
+        .bind(ed25519_public_key)
+        .bind(x25519_public_key)
+        .bind(kyber_public_key)
+        .bind(token_uuid)
         .execute(pool)
         .await?;
 
@@ -94,29 +92,25 @@ pub async fn verify_connection_token(
     debug!("Verifying connection token: {}", token);
 
     // Parse token as UUID
-    let token_uuid = UuidLib::parse_str(token)
+    let token_uuid = Uuid::parse_str(token)
         .map_err(|_| ServerError::AuthenticationError)?;
 
     // Look up public key hash by token
-    let result = sqlx::query!(
-        "SELECT public_key_hash FROM public_keys WHERE connection_token = $1",
-        token_uuid
-    )
-    .fetch_optional(pool)
-    .await?;
+    let result = sqlx::query("SELECT public_key_hash FROM public_keys WHERE connection_token = $1")
+        .bind(token_uuid)
+        .fetch_optional(pool)
+        .await?;
 
     match result {
         Some(record) => {
             debug!("Token verified successfully");
             // Update last active timestamp
-            sqlx::query!(
-                "UPDATE public_keys SET last_active = NOW() WHERE connection_token = $1",
-                token_uuid
-            )
-            .execute(pool)
-            .await?;
+            sqlx::query("UPDATE public_keys SET last_active = NOW() WHERE connection_token = $1")
+                .bind(token_uuid)
+                .execute(pool)
+                .await?;
 
-            Ok(record.public_key_hash)
+            Ok(record.get("public_key_hash"))
         }
         None => {
             error!("Invalid connection token");
@@ -140,26 +134,26 @@ pub async fn store_prekeys(
 
     for prekey in prekeys {
         // Check if this key_id already exists for this public key
-        let existing = sqlx::query!(
+        let existing = sqlx::query(
             "SELECT id FROM prekeys 
-             WHERE public_key_hash = $1 AND key_id = $2",
-            public_key_hash,
-            &prekey.key_id
+             WHERE public_key_hash = $1 AND key_id = $2"
         )
+        .bind(public_key_hash)
+        .bind(&prekey.key_id)
         .fetch_optional(&mut tx)
         .await?;
 
         if existing.is_none() {
             // Insert new prekey
-            sqlx::query!(
+            sqlx::query(
                 "INSERT INTO prekeys 
                  (public_key_hash, key_id, x25519_public_key, kyber_public_key, is_used) 
-                 VALUES ($1, $2, $3, $4, FALSE)",
-                public_key_hash,
-                &prekey.key_id,
-                &prekey.x25519,
-                &prekey.kyber.0
+                 VALUES ($1, $2, $3, $4, FALSE)"
             )
+            .bind(public_key_hash)
+            .bind(&prekey.key_id)
+            .bind(&prekey.x25519)
+            .bind(&prekey.kyber.0)
             .execute(&mut tx)
             .await?;
 
@@ -183,14 +177,14 @@ pub async fn get_prekeys(
     info!("Fetching prekeys for hash: {}", hex::encode(public_key_hash));
 
     // Get prekeys that haven't been used yet
-    let rows = sqlx::query!(
+    let rows = sqlx::query(
         "SELECT key_id, x25519_public_key, kyber_public_key 
          FROM prekeys 
          WHERE public_key_hash = $1 AND is_used = FALSE 
-         LIMIT $2",
-        public_key_hash,
-        limit
+         LIMIT $2"
     )
+    .bind(public_key_hash)
+    .bind(limit)
     .fetch_all(pool)
     .await?;
 
@@ -204,28 +198,30 @@ pub async fn get_prekeys(
     // Start a transaction to mark prekeys as used
     let mut tx = pool.begin().await?;
 
-    for row in &rows {
-        sqlx::query!(
-            "UPDATE prekeys SET is_used = TRUE WHERE public_key_hash = $1 AND key_id = $2",
-            public_key_hash,
-            &row.key_id
+    let mut prekeys = Vec::with_capacity(rows.len());
+
+    for row in rows {
+        let key_id: Vec<u8> = row.get("key_id");
+        let x25519: Vec<u8> = row.get("x25519_public_key");
+        let kyber: Vec<u8> = row.get("kyber_public_key");
+        
+        prekeys.push(PreKeyBundle {
+            key_id,
+            x25519,
+            kyber: crate::models::KyberPublicKey(kyber),
+        });
+        
+        sqlx::query(
+            "UPDATE prekeys SET is_used = TRUE WHERE public_key_hash = $1 AND key_id = $2"
         )
+        .bind(public_key_hash)
+        .bind(&prekeys.last().unwrap().key_id)
         .execute(&mut tx)
         .await?;
     }
 
     // Commit the transaction
     tx.commit().await?;
-
-    // Convert rows to PreKeyBundle objects
-    let prekeys = rows
-        .into_iter()
-        .map(|row| PreKeyBundle {
-            key_id: row.key_id,
-            x25519: row.x25519_public_key,
-            kyber: crate::models::KyberPublicKey(row.kyber_public_key),
-        })
-        .collect();
 
     info!("Returning {} prekeys", prekeys.len());
     Ok(prekeys)
@@ -254,15 +250,15 @@ pub async fn store_message(
         .as_secs();
 
     // Insert the message
-    sqlx::query!(
+    sqlx::query(
         "INSERT INTO pending_messages 
          (id, recipient_key_hash, encrypted_content, created_at, expiry, is_delivered) 
-         VALUES ($1, $2, $3, NOW(), to_timestamp($4), FALSE)",
-        message_id,
-        recipient_key_hash,
-        encrypted_content,
-        expiry_timestamp as f64
+         VALUES ($1, $2, $3, NOW(), to_timestamp($4), FALSE)"
     )
+    .bind(message_id)
+    .bind(recipient_key_hash)
+    .bind(encrypted_content)
+    .bind(expiry_timestamp as f64)
     .execute(pool)
     .await?;
 
@@ -278,27 +274,33 @@ pub async fn get_pending_messages(
     info!("Fetching pending messages for: {}", hex::encode(public_key_hash));
 
     // Get messages that haven't been delivered
-    let rows = sqlx::query!(
+    let rows = sqlx::query(
         "SELECT id, recipient_key_hash, encrypted_content, 
          extract(epoch from expiry)::bigint as expiry_epoch
          FROM pending_messages 
          WHERE recipient_key_hash = $1 AND is_delivered = FALSE 
-         ORDER BY created_at ASC",
-        public_key_hash
+         ORDER BY created_at ASC"
     )
+    .bind(public_key_hash)
     .fetch_all(pool)
     .await?;
 
     // Convert rows to Message objects
-    let messages = rows
-        .into_iter()
-        .map(|row| Message {
-            id: hex::encode(&row.id),
-            recipient_key_hash: hex::encode(&row.recipient_key_hash),
-            encrypted_content: row.encrypted_content,
-            expiry: row.expiry_epoch as u64,
-        })
-        .collect();
+    let mut messages = Vec::with_capacity(rows.len());
+    
+    for row in rows {
+        let id: Vec<u8> = row.get("id");
+        let recipient_key_hash: Vec<u8> = row.get("recipient_key_hash");
+        let encrypted_content: Vec<u8> = row.get("encrypted_content");
+        let expiry_epoch: i64 = row.get("expiry_epoch");
+        
+        messages.push(Message {
+            id: hex::encode(&id),
+            recipient_key_hash: hex::encode(&recipient_key_hash),
+            encrypted_content,
+            expiry: expiry_epoch as u64,
+        });
+    }
 
     info!("Found {} pending messages", messages.len());
     Ok(messages)
@@ -312,12 +314,10 @@ pub async fn mark_message_delivered(
     info!("Marking message as delivered: {}", hex::encode(message_id));
 
     // Update message status
-    let result = sqlx::query!(
-        "UPDATE pending_messages SET is_delivered = TRUE WHERE id = $1",
-        message_id
-    )
-    .execute(pool)
-    .await?;
+    let result = sqlx::query("UPDATE pending_messages SET is_delivered = TRUE WHERE id = $1")
+        .bind(message_id)
+        .execute(pool)
+        .await?;
 
     if result.rows_affected() > 0 {
         info!("Message marked as delivered");
@@ -337,12 +337,10 @@ pub async fn create_topic(pool: &PgPool) -> Result<String, ServerError> {
     rand::Rng::fill(&mut rand::thread_rng(), &mut topic_hash);
 
     // Insert the topic
-    sqlx::query!(
-        "INSERT INTO topics (id, created_at) VALUES ($1, NOW())",
-        &topic_hash[..]
-    )
-    .execute(pool)
-    .await?;
+    sqlx::query("INSERT INTO topics (id, created_at) VALUES ($1, NOW())")
+        .bind(&topic_hash[..])
+        .execute(pool)
+        .await?;
 
     let hash_hex = hex::encode(&topic_hash);
     info!("Topic created with hash: {}", hash_hex);
@@ -354,20 +352,22 @@ pub async fn list_topics(pool: &PgPool) -> Result<Vec<Topic>, ServerError> {
     info!("Listing available topics");
 
     // Get all topics
-    let rows = sqlx::query!(
-        "SELECT id, extract(epoch from created_at)::bigint as created_at_epoch FROM topics ORDER BY created_at DESC"
-    )
-    .fetch_all(pool)
-    .await?;
+    let rows = sqlx::query("SELECT id, extract(epoch from created_at)::bigint as created_at_epoch FROM topics ORDER BY created_at DESC")
+        .fetch_all(pool)
+        .await?;
 
     // Convert rows to Topic objects
-    let topics = rows
-        .into_iter()
-        .map(|row| Topic {
-            hash: hex::encode(&row.id),
-            created_at: row.created_at_epoch as u64,
-        })
-        .collect();
+    let mut topics = Vec::with_capacity(rows.len());
+    
+    for row in rows {
+        let id: Vec<u8> = row.get("id");
+        let created_at_epoch: i64 = row.get("created_at_epoch");
+        
+        topics.push(Topic {
+            hash: hex::encode(&id),
+            created_at: created_at_epoch as u64,
+        });
+    }
 
     info!("Found {} topics", topics.len());
     Ok(topics)
@@ -386,7 +386,8 @@ pub async fn subscribe_to_topic(
     );
 
     // Check if topic exists
-    let topic_exists = sqlx::query!("SELECT 1 FROM topics WHERE id = $1", topic_id)
+    let topic_exists = sqlx::query("SELECT 1 FROM topics WHERE id = $1")
+        .bind(topic_id)
         .fetch_optional(pool)
         .await?;
 
@@ -397,34 +398,34 @@ pub async fn subscribe_to_topic(
     }
 
     // Check if already subscribed
-    let existing = sqlx::query!(
-        "SELECT 1 FROM topic_subscriptions WHERE topic_id = $1 AND subscriber_token = $2",
-        topic_id,
-        subscriber_token
+    let existing = sqlx::query(
+        "SELECT 1 FROM topic_subscriptions WHERE topic_id = $1 AND subscriber_token = $2"
     )
+    .bind(topic_id)
+    .bind(subscriber_token)
     .fetch_optional(pool)
     .await?;
 
     if existing.is_some() {
         // Update subscription
-        sqlx::query!(
-            "UPDATE topic_subscriptions SET routing_data = $3 WHERE topic_id = $1 AND subscriber_token = $2",
-            topic_id,
-            subscriber_token,
-            routing_data
+        sqlx::query(
+            "UPDATE topic_subscriptions SET routing_data = $3 WHERE topic_id = $1 AND subscriber_token = $2"
         )
+        .bind(topic_id)
+        .bind(subscriber_token)
+        .bind(routing_data)
         .execute(pool)
         .await?;
 
         info!("Updated existing subscription");
     } else {
         // Insert new subscription
-        sqlx::query!(
-            "INSERT INTO topic_subscriptions (topic_id, subscriber_token, routing_data) VALUES ($1, $2, $3)",
-            topic_id,
-            subscriber_token,
-            routing_data
+        sqlx::query(
+            "INSERT INTO topic_subscriptions (topic_id, subscriber_token, routing_data) VALUES ($1, $2, $3)"
         )
+        .bind(topic_id)
+        .bind(subscriber_token)
+        .bind(routing_data)
         .execute(pool)
         .await?;
 
@@ -446,11 +447,11 @@ pub async fn unsubscribe_from_topic(
     );
 
     // Delete subscription
-    let result = sqlx::query!(
-        "DELETE FROM topic_subscriptions WHERE topic_id = $1 AND subscriber_token = $2",
-        topic_id,
-        subscriber_token
+    let result = sqlx::query(
+        "DELETE FROM topic_subscriptions WHERE topic_id = $1 AND subscriber_token = $2"
     )
+    .bind(topic_id)
+    .bind(subscriber_token)
     .execute(pool)
     .await?;
 
@@ -489,33 +490,35 @@ pub async fn store_topic_message(
     let mut tx = pool.begin().await?;
 
     // Insert the message
-    sqlx::query!(
+    sqlx::query(
         "INSERT INTO topic_messages 
          (id, topic_id, encrypted_content, posted_at, expiry) 
-         VALUES ($1, $2, $3, NOW(), to_timestamp($4))",
-        message_id,
-        topic_id,
-        encrypted_content,
-        expiry_timestamp as f64
+         VALUES ($1, $2, $3, NOW(), to_timestamp($4))"
     )
+    .bind(message_id)
+    .bind(topic_id)
+    .bind(encrypted_content)
+    .bind(expiry_timestamp as f64)
     .execute(&mut tx)
     .await?;
 
     // Get subscribers for this topic
-    let subscribers = sqlx::query!(
-        "SELECT subscriber_token FROM topic_subscriptions WHERE topic_id = $1",
-        topic_id
+    let subscribers = sqlx::query(
+        "SELECT subscriber_token FROM topic_subscriptions WHERE topic_id = $1"
     )
+    .bind(topic_id)
     .fetch_all(&mut tx)
     .await?;
 
     // Insert delivery records for each subscriber
     for subscriber in subscribers {
-        sqlx::query!(
-            "INSERT INTO message_delivery (message_id, recipient_token, is_delivered) VALUES ($1, $2, FALSE)",
-            message_id,
-            subscriber.subscriber_token
+        let subscriber_token: Vec<u8> = subscriber.get("subscriber_token");
+        
+        sqlx::query(
+            "INSERT INTO message_delivery (message_id, recipient_token, is_delivered) VALUES ($1, $2, FALSE)"
         )
+        .bind(message_id)
+        .bind(&subscriber_token)
         .execute(&mut tx)
         .await?;
     }

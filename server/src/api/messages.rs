@@ -1,5 +1,5 @@
-use actix_web::{delete, get, post, web, HttpResponse};
-use log::{debug, error, info};
+use actix_web::{delete, get, post, web, HttpResponse, HttpRequest};
+use log::{info};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -7,17 +7,32 @@ use crate::db;
 use crate::error::ServerError;
 use crate::models::{FetchMessagesResponse, SendMessageRequest, SendMessageResponse};
 
+// Helper function to extract token from Authorization header
+fn extract_token(req: &HttpRequest) -> Result<&str, ServerError> {
+    let auth_header = req.headers().get("Authorization")
+        .ok_or(ServerError::AuthenticationError)?;
+        
+    let auth_str = auth_header.to_str()
+        .map_err(|_| ServerError::AuthenticationError)?;
+        
+    if !auth_str.starts_with("Bearer ") {
+        return Err(ServerError::AuthenticationError);
+    }
+    
+    Ok(auth_str.trim_start_matches("Bearer ").trim())
+}
+
 // Send a message
 #[post("/messages")]
 pub async fn send_message(
     pool: web::Data<PgPool>,
-    auth: web::Header<String>,
-    req: web::Json<SendMessageRequest>,
+    req: HttpRequest,
+    message_req: web::Json<SendMessageRequest>,
 ) -> Result<HttpResponse, ServerError> {
     info!("Received message send request");
     
     // Extract token from Authorization header
-    let token = auth.trim_start_matches("Bearer ").trim();
+    let token = extract_token(&req)?;
     
     // Verify token
     db::verify_connection_token(&pool, token).await?;
@@ -26,7 +41,7 @@ pub async fn send_message(
     let message_id = Uuid::new_v4().as_bytes().to_vec();
     
     // Convert hex to bytes
-    let recipient_hash = match hex::decode(&req.recipient_key_hash) {
+    let recipient_hash = match hex::decode(&message_req.recipient_key_hash) {
         Ok(hash) => hash,
         Err(_) => {
             return Err(ServerError::BadRequestError {
@@ -36,14 +51,14 @@ pub async fn send_message(
     };
     
     // Default expiry to 24 hours if not specified
-    let expiry = req.expiry.unwrap_or(86400);
+    let expiry = message_req.expiry.unwrap_or(86400);
     
     // Store message
     db::store_message(
         &pool,
         &message_id,
         &recipient_hash,
-        &req.encrypted_content,
+        &message_req.encrypted_content,
         expiry,
     ).await?;
     
@@ -84,14 +99,14 @@ pub async fn get_messages(
 #[delete("/messages/{message_id}")]
 pub async fn delete_message(
     pool: web::Data<PgPool>,
-    auth: web::Header<String>,
+    req: HttpRequest,
     path: web::Path<String>,
 ) -> Result<HttpResponse, ServerError> {
     let message_id_hex = path.into_inner();
     info!("Received message delete request for ID: {}", message_id_hex);
     
     // Extract token from Authorization header
-    let token = auth.trim_start_matches("Bearer ").trim();
+    let token = extract_token(&req)?;
     
     // Verify token
     db::verify_connection_token(&pool, token).await?;
