@@ -9,8 +9,367 @@ use tokio::time;
 use crate::crypto::keys::{IdentityKeyBundle, PreKeyBundle};
 use crate::storage::config::Config;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
+    pub id: String,
+    pub recipient_key_hash: String,
+    pub encrypted_content: Vec<u8>,
+    pub expiry: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TopicMessage {
+    pub id: String,
+    pub topic_hash: String,
+    pub encrypted_content: Vec<u8>,
+    pub posted_at: u64,
+    pub expiry: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Topic {
+    pub hash: String,
+    pub created_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnnouncementRequest {
+    pub ed25519_public_key: Vec<u8>,
+    pub x25519_public_key: Vec<u8>,
+    pub kyber_public_key: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnnouncementResponse {
+    pub connection_token: String,
+    pub public_key_hash: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PreKeysUploadRequest {
+    pub public_key_hash: String,
+    pub prekeys: Vec<PreKeyBundle>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PreKeysResponse {
+    pub status: String,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SendMessageRequest {
+    pub recipient_key_hash: String,
+    pub encrypted_content: Vec<u8>,
+    pub expiry: Option<u64>, // Optional TTL in seconds
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SendMessageResponse {
+    pub message_id: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FetchMessagesResponse {
+    pub messages: Vec<Message>,
+    pub more_available: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TopicCreateResponse {
+    pub topic_hash: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TopicListResponse {
+    pub topics: Vec<Topic>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TopicSubscribeRequest {
+    pub topic_hash: String,
+    pub subscriber_token: Vec<u8>,
+    pub routing_data: Vec<u8>, // Encrypted routing information
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SendTopicMessageRequest {
+    pub topic_hash: String,
+    pub encrypted_content: Vec<u8>,
+    pub expiry: Option<u64>, // Optional TTL in seconds
+}
+
+#[derive(Debug)]
+pub enum ConnectionError {
+    NetworkError(reqwest::Error),
+    ServerError(String),
+    AuthenticationError,
+    SerializationError(serde_json::Error),
+    InvalidResponse,
+    NoConnectionToken,
+    NoIdentity,
+}
+
+impl std::fmt::Display for ConnectionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConnectionError::NetworkError(e) => write!(f, "Network error: {}", e),
+            ConnectionError::ServerError(s) => write!(f, "Server error: {}", s),
+            ConnectionError::AuthenticationError => write!(f, "Authentication error"),
+            ConnectionError::SerializationError(e) => write!(f, "Serialization error: {}", e),
+            ConnectionError::InvalidResponse => write!(f, "Invalid response"),
+            ConnectionError::NoConnectionToken => write!(f, "No connection token"),
+            ConnectionError::NoIdentity => write!(f, "No identity"),
+        }
+    }
+}
+
+impl std::error::Error for ConnectionError {}
+
+impl From<reqwest::Error> for ConnectionError {
+    fn from(err: reqwest::Error) -> Self {
+        ConnectionError::NetworkError(err)
+    }
+}
+
+impl From<serde_json::Error> for ConnectionError {
+    fn from(err: serde_json::Error) -> Self {
+        ConnectionError::SerializationError(err)
+    }
+}
+
+#[derive(Clone)]
+pub struct ServerConnection {
+    client: Client,
+    config: Config,
+    identity: Option<IdentityKeyBundle>,
+}
+
+impl ServerConnection {
+    pub fn new(config: Config, identity: Option<IdentityKeyBundle>) -> Result<Self, ConnectionError> {
+        info!("Initializing server connection to: {}", config.server_url);
+        
+        // Create HTTP client with reasonable timeout and extra settings
+        let client = Client::builder()
+            .timeout(Duration::from_secs(30))
+            .user_agent("secnet/0.1.0")
+            .build()?;
+        
+        debug!("HTTP client initialized");
+        
+        Ok(ServerConnection {
+            client,
+            config,
+            identity,
+        })
+    }
+    
+    pub async fn announce(&self) -> Result<String, ConnectionError> {
+        info!("Announcing public keys to server");
+        
+        // Get identity key bundle
+        let identity = match &self.identity {
+            Some(keys) => keys,
+            None => {
+                error!("No identity keys available for announcement");
+                return Err(ConnectionError::NoIdentity);
+            }
+        };
+        
+        // Create announcement request
+        let request = AnnouncementRequest {
+            ed25519_public_key: identity.ed25519.public.clone(),
+            x25519_public_key: identity.x25519.public.clone(),
+            kyber_public_key: identity.kyber.public.0.clone(),
+        };
+        
+        // Send request to server
+        let url = format!("{}/announce", self.config.server_url);
+        debug!("Sending announcement to URL: {}", url);
+        
+        let response = self.client
+            .post(&url)
+            .json(&request)
+            .send()
+            .await?;
+        
+        // Handle response
+        match response.status() {
+            StatusCode::OK => {
+                debug!("Announcement successful, parsing response");
+                let announcement: AnnouncementResponse = response.json().await?;
+                
+                info!("Received connection token from server");
+                trace!("Connection token: {}", announcement.connection_token);
+                trace!("Public key hash: {}", announcement.public_key_hash);
+                
+                Ok(announcement.connection_token)
+            },
+            status => {
+                error!("Server returned error: {}", status);
+                Err(ConnectionError::ServerError(format!("Server returned {}", status)))
+            }
+        }
+    }
+    
+    pub async fn upload_prekeys(&self, prekeys: &[PreKeyBundle]) -> Result<usize, ConnectionError> {
+        info!("Uploading {} prekeys to server", prekeys.len());
+        
+        // Get public key hash
+        let identity = match &self.identity {
+            Some(keys) => keys,
+            None => {
+                error!("No identity keys available for prekey upload");
+                return Err(ConnectionError::NoIdentity);
+            }
+        };
+        
+        // Get connection token
+        let token = match &self.config.connection_token {
+            Some(token) => token,
+            None => {
+                error!("No connection token available");
+                return Err(ConnectionError::NoConnectionToken);
+            }
+        };
+        
+        // Create upload request
+        let request = PreKeysUploadRequest {
+            public_key_hash: identity.fingerprint.clone(),
+            prekeys: prekeys.to_vec(),
+        };
+        
+        // Send request to server
+        let url = format!("{}/prekeys", self.config.server_url);
+        debug!("Uploading prekeys to URL: {}", url);
+        
+        let response = self.client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .json(&request)
+            .send()
+            .await?;
+        
+        // Handle response
+        match response.status() {
+            StatusCode::OK => {
+                debug!("Prekey upload successful, parsing response");
+                let prekey_response: PreKeysResponse = response.json().await?;
+                
+                info!("Server accepted {} prekeys", prekey_response.count);
+                Ok(prekey_response.count)
+            },
+            StatusCode::UNAUTHORIZED => {
+                error!("Server rejected authentication");
+                Err(ConnectionError::AuthenticationError)
+            },
+            status => {
+                error!("Server returned error: {}", status);
+                Err(ConnectionError::ServerError(format!("Server returned {}", status)))
+            }
+        }
+    }
+    
+    pub async fn fetch_prekeys(&self, peer_key_hash: &str) -> Result<Vec<PreKeyBundle>, ConnectionError> {
+        info!("Fetching prekeys for peer: {}", peer_key_hash);
+        
+        // Get connection token
+        let token = match &self.config.connection_token {
+            Some(token) => token,
+            None => {
+                error!("No connection token available");
+                return Err(ConnectionError::NoConnectionToken);
+            }
+        };
+        
+        // Send request to server
+        let url = format!("{}/prekeys/{}", self.config.server_url, peer_key_hash);
+        debug!("Fetching prekeys from URL: {}", url);
+        
+        let response = self.client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+            .await?;
+        
+        // Handle response
+        match response.status() {
+            StatusCode::OK => {
+                debug!("Prekey fetch successful, parsing response");
+                let prekeys: Vec<PreKeyBundle> = response.json().await?;
+                
+                info!("Received {} prekeys for peer", prekeys.len());
+                trace!("First prekey ID: {:?}", prekeys.first().map(|pk| hex::encode(&pk.key_id)));
+                
+                Ok(prekeys)
+            },
+            StatusCode::NOT_FOUND => {
+                warn!("No prekeys found for peer: {}", peer_key_hash);
+                Ok(Vec::new())
+            },
+            StatusCode::UNAUTHORIZED => {
+                error!("Server rejected authentication");
+                Err(ConnectionError::AuthenticationError)
+            },
+            status => {
+                error!("Server returned error: {}", status);
+                Err(ConnectionError::ServerError(format!("Server returned {}", status)))
+            }
+        }
+    }
+    
+    pub async fn send_message(&self, recipient_key_hash: &str, encrypted_content: &[u8], ttl: Option<u64>) -> Result<String, ConnectionError> {
+        info!("Sending message to recipient: {}", recipient_key_hash);
+        trace!("Message size: {} bytes", encrypted_content.len());
+        
+        // Get connection token
+        let token = match &self.config.connection_token {
+            Some(token) => token,
+            None => {
+                error!("No connection token available");
+                return Err(ConnectionError::NoConnectionToken);
+            }
+        };
+        
+        // Create request
+        let request = SendMessageRequest {
+            recipient_key_hash: recipient_key_hash.to_string(),
+            encrypted_content: encrypted_content.to_vec(),
+            expiry: ttl.or(Some(86400)), // Default 24 hours TTL
+        };
+        
+        // Send request to server
+        let url = format!("{}/messages", self.config.server_url);
+        debug!("Sending message to URL: {}", url);
+        
+        let response = self.client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .json(&request)
+            .send()
+            .await?;
+        
+        // Handle response
+        match response.status() {
+            StatusCode::OK | StatusCode::CREATED => {
+                debug!("Message sent successfully, parsing response");
+                let send_response: SendMessageResponse = response.json().await?;
+                
+                info!("Message sent, ID: {}", send_response.message_id);
+                Ok(send_response.message_id)
+            },
+            StatusCode::UNAUTHORIZED => {
+                error!("Server rejected authentication");
+                Err(ConnectionError::AuthenticationError)
+            },
+            status => {
+                error!("Server returned error: {}", status);
+                Err(ConnectionError::ServerError(format!("Server returned {}", status)))
+            }
+        }
+    }
+    
     pub async fn fetch_messages(&self) -> Result<Vec<Message>, ConnectionError> {
         info!("Fetching pending messages");
         
@@ -491,349 +850,4 @@ pub struct Message {
             }
         }
     }
-} id: String,
-    pub recipient_key_hash: String,
-    pub encrypted_content: Vec<u8>,
-    pub expiry: u64,
 }
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct TopicMessage {
-    pub id: String,
-    pub topic_hash: String,
-    pub encrypted_content: Vec<u8>,
-    pub posted_at: u64,
-    pub expiry: u64,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Topic {
-    pub hash: String,
-    pub created_at: u64,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct AnnouncementRequest {
-    pub ed25519_public_key: Vec<u8>,
-    pub x25519_public_key: Vec<u8>,
-    pub kyber_public_key: Vec<u8>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct AnnouncementResponse {
-    pub connection_token: String,
-    pub public_key_hash: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct PreKeysUploadRequest {
-    pub public_key_hash: String,
-    pub prekeys: Vec<PreKeyBundle>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct PreKeysResponse {
-    pub status: String,
-    pub count: usize,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SendMessageRequest {
-    pub recipient_key_hash: String,
-    pub encrypted_content: Vec<u8>,
-    pub expiry: Option<u64>, // Optional TTL in seconds
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SendMessageResponse {
-    pub message_id: String,
-    pub status: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct FetchMessagesResponse {
-    pub messages: Vec<Message>,
-    pub more_available: bool,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct TopicCreateResponse {
-    pub topic_hash: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct TopicListResponse {
-    pub topics: Vec<Topic>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct TopicSubscribeRequest {
-    pub topic_hash: String,
-    pub subscriber_token: Vec<u8>,
-    pub routing_data: Vec<u8>, // Encrypted routing information
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SendTopicMessageRequest {
-    pub topic_hash: String,
-    pub encrypted_content: Vec<u8>,
-    pub expiry: Option<u64>, // Optional TTL in seconds
-}
-
-#[derive(Debug)]
-pub enum ConnectionError {
-    NetworkError(reqwest::Error),
-    ServerError(String),
-    AuthenticationError,
-    SerializationError(serde_json::Error),
-    InvalidResponse,
-    NoConnectionToken,
-    NoIdentity,
-}
-
-impl From<reqwest::Error> for ConnectionError {
-    fn from(err: reqwest::Error) -> Self {
-        ConnectionError::NetworkError(err)
-    }
-}
-
-impl From<serde_json::Error> for ConnectionError {
-    fn from(err: serde_json::Error) -> Self {
-        ConnectionError::SerializationError(err)
-    }
-}
-
-pub struct ServerConnection {
-    client: Client,
-    config: Config,
-    identity: Option<IdentityKeyBundle>,
-}
-
-impl ServerConnection {
-    pub fn new(config: Config, identity: Option<IdentityKeyBundle>) -> Result<Self, ConnectionError> {
-        info!("Initializing server connection to: {}", config.server_url);
-        
-        // Create HTTP client with reasonable timeout and extra settings
-        let client = Client::builder()
-            .timeout(Duration::from_secs(30))
-            .user_agent("secnet/0.1.0")
-            .build()?;
-        
-        debug!("HTTP client initialized");
-        
-        Ok(ServerConnection {
-            client,
-            config,
-            identity,
-        })
-    }
-    
-    pub async fn announce(&mut self) -> Result<String, ConnectionError> {
-        info!("Announcing public keys to server");
-        
-        // Get identity key bundle
-        let identity = match &self.identity {
-            Some(keys) => keys,
-            None => {
-                error!("No identity keys available for announcement");
-                return Err(ConnectionError::NoIdentity);
-            }
-        };
-        
-        // Create announcement request
-        let request = AnnouncementRequest {
-            ed25519_public_key: identity.ed25519.public.clone(),
-            x25519_public_key: identity.x25519.public.clone(),
-            kyber_public_key: identity.kyber.public.0.clone(),
-        };
-        
-        // Send request to server
-        let url = format!("{}/announce", self.config.server_url);
-        debug!("Sending announcement to URL: {}", url);
-        
-        let response = self.client
-            .post(&url)
-            .json(&request)
-            .send()
-            .await?;
-        
-        // Handle response
-        match response.status() {
-            StatusCode::OK => {
-                debug!("Announcement successful, parsing response");
-                let announcement: AnnouncementResponse = response.json().await?;
-                
-                info!("Received connection token from server");
-                trace!("Connection token: {}", announcement.connection_token);
-                trace!("Public key hash: {}", announcement.public_key_hash);
-                
-                // Update config with connection token
-                self.config.update_connection_token(&announcement.connection_token);
-                
-                Ok(announcement.connection_token)
-            },
-            status => {
-                error!("Server returned error: {}", status);
-                Err(ConnectionError::ServerError(format!("Server returned {}", status)))
-            }
-        }
-    }
-    
-    pub async fn upload_prekeys(&self, prekeys: &[PreKeyBundle]) -> Result<usize, ConnectionError> {
-        info!("Uploading {} prekeys to server", prekeys.len());
-        
-        // Get public key hash
-        let identity = match &self.identity {
-            Some(keys) => keys,
-            None => {
-                error!("No identity keys available for prekey upload");
-                return Err(ConnectionError::NoIdentity);
-            }
-        };
-        
-        // Get connection token
-        let token = match &self.config.connection_token {
-            Some(token) => token,
-            None => {
-                error!("No connection token available");
-                return Err(ConnectionError::NoConnectionToken);
-            }
-        };
-        
-        // Create upload request
-        let request = PreKeysUploadRequest {
-            public_key_hash: identity.fingerprint.clone(),
-            prekeys: prekeys.to_vec(),
-        };
-        
-        // Send request to server
-        let url = format!("{}/prekeys", self.config.server_url);
-        debug!("Uploading prekeys to URL: {}", url);
-        
-        let response = self.client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", token))
-            .json(&request)
-            .send()
-            .await?;
-        
-        // Handle response
-        match response.status() {
-            StatusCode::OK => {
-                debug!("Prekey upload successful, parsing response");
-                let prekey_response: PreKeysResponse = response.json().await?;
-                
-                info!("Server accepted {} prekeys", prekey_response.count);
-                Ok(prekey_response.count)
-            },
-            StatusCode::UNAUTHORIZED => {
-                error!("Server rejected authentication");
-                Err(ConnectionError::AuthenticationError)
-            },
-            status => {
-                error!("Server returned error: {}", status);
-                Err(ConnectionError::ServerError(format!("Server returned {}", status)))
-            }
-        }
-    }
-    
-    pub async fn fetch_prekeys(&self, peer_key_hash: &str) -> Result<Vec<PreKeyBundle>, ConnectionError> {
-        info!("Fetching prekeys for peer: {}", peer_key_hash);
-        
-        // Get connection token
-        let token = match &self.config.connection_token {
-            Some(token) => token,
-            None => {
-                error!("No connection token available");
-                return Err(ConnectionError::NoConnectionToken);
-            }
-        };
-        
-        // Send request to server
-        let url = format!("{}/prekeys/{}", self.config.server_url, peer_key_hash);
-        debug!("Fetching prekeys from URL: {}", url);
-        
-        let response = self.client
-            .get(&url)
-            .header("Authorization", format!("Bearer {}", token))
-            .send()
-            .await?;
-        
-        // Handle response
-        match response.status() {
-            StatusCode::OK => {
-                debug!("Prekey fetch successful, parsing response");
-                let prekeys: Vec<PreKeyBundle> = response.json().await?;
-                
-                info!("Received {} prekeys for peer", prekeys.len());
-                trace!("First prekey ID: {:?}", prekeys.first().map(|pk| hex::encode(&pk.key_id)));
-                
-                Ok(prekeys)
-            },
-            StatusCode::NOT_FOUND => {
-                warn!("No prekeys found for peer: {}", peer_key_hash);
-                Ok(Vec::new())
-            },
-            StatusCode::UNAUTHORIZED => {
-                error!("Server rejected authentication");
-                Err(ConnectionError::AuthenticationError)
-            },
-            status => {
-                error!("Server returned error: {}", status);
-                Err(ConnectionError::ServerError(format!("Server returned {}", status)))
-            }
-        }
-    }
-    
-    pub async fn send_message(&self, recipient_key_hash: &str, encrypted_content: &[u8], ttl: Option<u64>) -> Result<String, ConnectionError> {
-        info!("Sending message to recipient: {}", recipient_key_hash);
-        trace!("Message size: {} bytes", encrypted_content.len());
-        
-        // Get connection token
-        let token = match &self.config.connection_token {
-            Some(token) => token,
-            None => {
-                error!("No connection token available");
-                return Err(ConnectionError::NoConnectionToken);
-            }
-        };
-        
-        // Create request
-        let request = SendMessageRequest {
-            recipient_key_hash: recipient_key_hash.to_string(),
-            encrypted_content: encrypted_content.to_vec(),
-            expiry: ttl.or(Some(86400)), // Default 24 hours TTL
-        };
-        
-        // Send request to server
-        let url = format!("{}/messages", self.config.server_url);
-        debug!("Sending message to URL: {}", url);
-        
-        let response = self.client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", token))
-            .json(&request)
-            .send()
-            .await?;
-        
-        // Handle response
-        match response.status() {
-            StatusCode::OK | StatusCode::CREATED => {
-                debug!("Message sent successfully, parsing response");
-                let send_response: SendMessageResponse = response.json().await?;
-                
-                info!("Message sent, ID: {}", send_response.message_id);
-                Ok(send_response.message_id)
-            },
-            StatusCode::UNAUTHORIZED => {
-                error!("Server rejected authentication");
-                Err(ConnectionError::AuthenticationError)
-            },
-            status => {
-                error!("Server returned error: {}", status);
-                Err(ConnectionError::ServerError(format!("Server returned {}", status)))
-            }
-        }
-    }
-    
-    pub

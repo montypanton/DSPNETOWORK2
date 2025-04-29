@@ -1,9 +1,8 @@
 // client/src/cli/commands/peer.rs
 use clap::ArgMatches;
-use log::{debug, error, info, trace, warn};
+use log::{debug, error, info, trace};
 use std::fs::File;
 use std::io::Read;
-use std::path::Path;
 use prettytable::{Table, Row, Cell};
 
 use crate::crypto::keys::KeyManager;
@@ -27,16 +26,16 @@ pub async fn execute(matches: &ArgMatches, config: &Config) -> Result<(), Box<dy
     }
     
     match matches.subcommand() {
-        ("list", Some(_)) => {
+        Some(("list", _)) => {
             list_peers(&key_manager)?;
         },
-        ("add", Some(sub_m)) => {
+        Some(("add", sub_m)) => {
             add_peer(sub_m, &mut key_manager)?;
         },
-        ("verify", Some(sub_m)) => {
+        Some(("verify", sub_m)) => {
             verify_peer(sub_m, &key_manager)?;
         },
-        ("remove", Some(sub_m)) => {
+        Some(("remove", sub_m)) => {
             remove_peer(sub_m, &mut key_manager)?;
         },
         _ => {
@@ -116,17 +115,15 @@ fn add_peer(matches: &ArgMatches, key_manager: &mut KeyManager) -> Result<(), Bo
         std::io::stdin().read_line(&mut input)?;
         
         // Attempt to decode Base64
-        match base64::decode(input.trim()) {
-            Ok(decoded) => {
-                debug!("Decoded Base64 key, {} bytes", decoded.len());
-                decoded
-            },
-            Err(_) => {
+        let decoded = base64::decode(input.trim())
+            .map_err(|_| {
                 // Maybe it's already raw JSON
                 debug!("Not valid Base64, treating as raw JSON");
                 input.trim().as_bytes().to_vec()
-            }
-        }
+            })?;
+            
+        debug!("Decoded Base64 key, {} bytes", decoded.len());
+        decoded
     };
     
     // Import peer key
@@ -196,7 +193,7 @@ fn remove_peer(matches: &ArgMatches, key_manager: &mut KeyManager) -> Result<(),
     if key_manager.get_peer(fingerprint).is_none() {
         println!("No peer found with fingerprint: {}", fingerprint);
         error!("No peer found with fingerprint: {}", fingerprint);
-        return Err("Peer not found".into());
+        return Err("Peer notfound".into());
     }
     
     // Ask for confirmation

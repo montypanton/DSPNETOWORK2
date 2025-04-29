@@ -1,10 +1,9 @@
 // client/src/main.rs
 use clap::{App, Arg, SubCommand};
-use log::{debug, error, info, trace, warn, LevelFilter};
-use simplelog::{ColorChoice, Config, TermLogger, TerminalMode, WriteLogger};
+use log::{debug, info, warn, LevelFilter};
+use simplelog::{ColorChoice, Config as SimplelogConfig, TermLogger, TerminalMode, WriteLogger};
 use std::fs::File;
 use std::path::PathBuf;
-use std::process;
 
 mod cli;
 mod crypto;
@@ -12,8 +11,6 @@ mod network;
 mod storage;
 
 use cli::commands;
-use crypto::keys::KeyManager;
-use network::connection::ServerConnection;
 use storage::config::Config;
 
 #[tokio::main]
@@ -25,7 +22,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .about("Privacy-focused secure messaging CLI")
         .arg(
             Arg::with_name("config")
-                .short("c")
+                .short('c')
                 .long("config")
                 .value_name("FILE")
                 .help("Sets a custom config file")
@@ -33,7 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .arg(
             Arg::with_name("verbose")
-                .short("v")
+                .short('v')
                 .long("verbose")
                 .help("Enable verbose output"),
         )
@@ -254,7 +251,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(log_file) = matches.value_of("log-file") {
         WriteLogger::init(
             log_level,
-            Config::default(),
+            SimplelogConfig::default(),
             File::create(log_file).expect("Failed to create log file"),
         )
         .expect("Failed to initialize file logger");
@@ -262,7 +259,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         TermLogger::init(
             log_level,
-            Config::default(),
+            SimplelogConfig::default(),
             TerminalMode::Mixed,
             ColorChoice::Auto,
         )
@@ -291,10 +288,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             config
         }
         Err(e) => {
-            warn!("Failed to load config, using defaults: {}", e);
+            warn!("Failed to load config, using defaults: {:?}", e);
             let default_config = Config::default();
             if let Err(e) = default_config.save(&config_path) {
-                warn!("Failed to save default config: {}", e);
+                warn!("Failed to save default config: {:?}", e);
             } else {
                 info!("Default configuration saved to {:?}", config_path);
             }
@@ -304,27 +301,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Process subcommands
     match matches.subcommand() {
-        ("keygen", Some(sub_m)) => {
+        Some(("keygen", sub_m)) => {
             info!("Executing key generation command");
             commands::keygen::execute(sub_m, &config).await?
         }
-        ("connect", Some(sub_m)) => {
+        Some(("connect", sub_m)) => {
             info!("Executing connect command");
             commands::connect::execute(sub_m, &config).await?
         }
-        ("peer", Some(sub_m)) => {
+        Some(("peer", sub_m)) => {
             info!("Executing peer management command");
             commands::peer::execute(sub_m, &config).await?
         }
-        ("msg", Some(sub_m)) => {
+        Some(("msg", sub_m)) => {
             info!("Executing message command");
             commands::msg::execute(sub_m, &config).await?
         }
-        ("topic", Some(sub_m)) => {
+        Some(("topic", sub_m)) => {
             info!("Executing topic command");
             commands::topic::execute(sub_m, &config).await?
         }
-        ("status", Some(sub_m)) => {
+        Some(("status", sub_m)) => {
             info!("Executing status command");
             commands::status::execute(sub_m, &config).await?
         }

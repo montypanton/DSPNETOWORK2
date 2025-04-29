@@ -1424,6 +1424,7 @@ dependencies = [
  "hmac",
  "log",
  "prettytable-rs",
+ "rand 0.7.3",
  "rand 0.8.5",
  "reqwest",
  "rpassword",

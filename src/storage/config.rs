@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use log::{debug, error, info, trace, warn};
+use log::{debug, error, info, trace};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
@@ -37,6 +37,18 @@ pub enum ConfigError {
     SerializationError(serde_json::Error),
     InvalidPath,
 }
+
+impl std::fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConfigError::IoError(e) => write!(f, "IO error: {}", e),
+            ConfigError::SerializationError(e) => write!(f, "Serialization error: {}", e),
+            ConfigError::InvalidPath => write!(f, "Invalid path"),
+        }
+    }
+}
+
+impl std::error::Error for ConfigError {}
 
 impl From<std::io::Error> for ConfigError {
     fn from(err: std::io::Error) -> Self {
@@ -156,11 +168,16 @@ impl Config {
     pub fn ensure_directories_exist(&self) -> Result<(), ConfigError> {
         info!("Ensuring all storage directories exist");
         
+        // Create persistent references to avoid temporary value issues
+        let keys_path = self.get_keys_path();
+        let messages_path = self.get_messages_path();
+        let topics_path = self.get_topics_path();
+        
         let dirs = [
             self.storage_path.as_path(),
-            self.get_keys_path().as_path(),
-            self.get_messages_path().as_path(),
-            self.get_topics_path().as_path(),
+            keys_path.as_path(),
+            messages_path.as_path(),
+            topics_path.as_path(),
         ];
         
         for dir in &dirs {

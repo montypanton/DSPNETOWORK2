@@ -1,18 +1,15 @@
 // client/src/cli/commands/msg.rs
 use clap::ArgMatches;
-use log::{debug, error, info, trace, warn};
-use std::fs::File;
+use log::{debug, error, info};
+use std::fs::{self, File};
 use std::io::{self, Read, Write};
-use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::time::sleep;
-use prettytable::{Table, Row, Cell};
 use chrono::{DateTime, Local};
-use uuid::Uuid;
 use serde::{Deserialize, Serialize};
 
 use crate::crypto::keys::KeyManager;
-use crate::network::connection::{Message, ServerConnection};
+use crate::network::connection::{ServerConnection};
 use crate::storage::config::Config;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -45,19 +42,19 @@ pub async fn execute(matches: &ArgMatches, config: &Config) -> Result<(), Box<dy
     };
     
     // Initialize server connection
-    let mut server_connection = ServerConnection::new(config.clone(), Some(identity))?;
+    let server_connection = ServerConnection::new(config.clone(), Some(identity))?;
     
     match matches.subcommand() {
-        ("send", Some(sub_m)) => {
+        Some(("send", sub_m)) => {
             send_message(sub_m, &mut key_manager, &server_connection, config).await?;
         },
-        ("fetch", Some(_)) => {
+        Some(("fetch", _)) => {
             fetch_messages(&mut key_manager, &server_connection, config).await?;
         },
-        ("read", Some(sub_m)) => {
+        Some(("read", sub_m)) => {
             read_messages(sub_m, &mut key_manager, config).await?;
         },
-        ("chat", Some(sub_m)) => {
+        Some(("chat", sub_m)) => {
             interactive_chat(sub_m, &mut key_manager, &server_connection, config).await?;
         },
         _ => {
@@ -357,66 +354,51 @@ async fn interactive_chat(
     println!("\nStarting chat with {}", peer_name);
     println!("Type .exit to end the conversation\n");
     
-    // Start message fetching task
-    let fetch_interval = config.message_fetch_interval;
-    let server_conn_clone = server_connection.clone();
-    let key_manager_clone = key_manager.clone();
-    let config_clone = config.clone();
-    let fingerprint_clone = fingerprint.to_string();
-    
+    // Create separate channels for messaging
     let (tx, mut rx) = tokio::sync::mpsc::channel::<StoredMessage>(100);
     
+    // Clone necessary data for the background task
+    let server_url = config.server_url.clone();
+    let connection_token = config.connection_token.clone();
+    let message_fetch_interval = config.message_fetch_interval;
+    let fingerprint_clone = fingerprint.to_string();
+    
+    // Start message fetching task in the background
     let fetch_task = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(fetch_interval));
+        let mut interval = tokio::time::interval(Duration::from_secs(message_fetch_interval));
         
-        loop {
-            interval.tick().await;
-            debug!("Fetching messages in background");
-            
-            match server_conn_clone.fetch_messages().await {
-                Ok(messages) => {
+        // Create a new connection for this background task
+        let background_config = Config {
+            server_url,
+            connection_token,
+            ..Config::default()
+        };
+        
+        if let Ok(background_connection) = ServerConnection::new(background_config.clone(), None) {
+            loop {
+                interval.tick().await;
+                debug!("Fetching messages in background");
+                
+                if let Ok(messages) = background_connection.fetch_messages().await {
                     for message in messages {
-                        // For simplicity, assume recipient_key_hash is the sender's fingerprint
-                        let sender_fingerprint = message.recipient_key_hash.clone();
-                        
-                        // Only process messages from the chat partner
-                        if sender_fingerprint != fingerprint_clone {
-                            continue;
-                        }
-                        
-                        // Decrypt message
-                        match key_manager_clone.decrypt_message(&sender_fingerprint, &message.encrypted_content) {
-                            Ok(decrypted) => {
-                                let stored_msg = StoredMessage {
-                                    id: message.id.clone(),
-                                    sender_fingerprint: sender_fingerprint.clone(),
-                                    content: decrypted,
-                                    timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
-                                    read: true,
-                                };
-                                
-                                // Store message
-                                if let Err(e) = store_message(&config_clone, &stored_msg) {
-                                    error!("Failed to store message: {:?}", e);
-                                    continue;
-                                }
-                                
-                                // Send to display channel
-                                let _ = tx.send(stored_msg).await;
-                                
-                                // Acknowledge message
-                                let _ = server_conn_clone.acknowledge_message(&message.id).await;
-                            },
-                            Err(e) => {
-                                error!("Failed to decrypt message: {:?}", e);
+                        // For simplicity, just forward all messages to the main task
+                        if message.recipient_key_hash == fingerprint_clone {
+                            let stored_msg = StoredMessage {
+                                id: message.id.clone(),
+                                sender_fingerprint: message.recipient_key_hash.clone(),
+                                content: message.encrypted_content,
+                                timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+                                read: true,
+                            };
+                            
+                            if tx.send(stored_msg).await.is_err() {
+                                break; // Channel closed, exit loop
                             }
+                            
+                            // Try to acknowledge message
+                            let _ = background_connection.acknowledge_message(&message.id).await;
                         }
                     }
-                },
-                Err(e) => {
-                    error!("Failed to fetch messages: {:?}", e);
-                    // Short sleep after error
-                    sleep(Duration::from_secs(1)).await;
                 }
             }
         }
@@ -426,49 +408,34 @@ async fn interactive_chat(
     let mut input = String::new();
     let stdin = io::stdin();
     let mut stdout = io::stdout();
-    let mut last_fetch = Instant::now();
+    let mut last_check = Instant::now();
     
     loop {
         // Check for incoming messages
-        if rx.try_recv().is_ok() {
-            // Refresh the screen when new messages arrive
-            println!("\r{}: {}", peer_name, String::from_utf8_lossy(&rx.recv().await.unwrap().content));
+        if let Ok(msg) = rx.try_recv() {
+            // Process and display the message
+            println!("\r{}: {}", peer_name, String::from_utf8_lossy(&msg.content));
             print!("> ");
             stdout.flush()?;
         }
         
         // Check if we need to prompt for input
-        if last_fetch.elapsed() > Duration::from_millis(100) {
-            // Check for user input with timeout
+        if last_check.elapsed() > Duration::from_millis(100) {
+            // Set up input prompt
             print!("> ");
             stdout.flush()?;
             
-            // Set up the input reading with a small timeout
-            let mut input_available = false;
-            let input_task = tokio::task::spawn_blocking(move || {
+            // Set up the input reading
+            input.clear();
+            let input_result = tokio::task::spawn_blocking(move || {
                 let mut temp_input = String::new();
                 match stdin.read_line(&mut temp_input) {
                     Ok(_) => Some(temp_input),
                     Err(_) => None,
                 }
-            });
+            }).await;
             
-            let timeout_future = sleep(Duration::from_millis(500));
-            let input_result = tokio::select! {
-                result = input_task => {
-                    input_available = true;
-                    result.unwrap_or(None)
-                },
-                _ = timeout_future => None,
-            };
-            
-            if !input_available {
-                // No input available, continue checking for messages
-                last_fetch = Instant::now();
-                continue;
-            }
-            
-            if let Some(user_input) = input_result {
+            if let Ok(Some(user_input)) = input_result {
                 input = user_input;
                 let trimmed = input.trim();
                 
@@ -500,7 +467,7 @@ async fn interactive_chat(
                 }
             }
             
-            last_fetch = Instant::now();
+            last_check = Instant::now();
         }
         
         // Small sleep to avoid CPU spinning

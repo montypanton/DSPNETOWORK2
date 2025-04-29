@@ -8,7 +8,7 @@ use std::env;
 use std::time::Duration;
 
 // Use lib.rs exports
-use secnet_server::{configure_api, error::ServerError};
+use secnet_server::configure_api;
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
