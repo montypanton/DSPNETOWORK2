@@ -1,74 +1,6 @@
-fn verify_peer(matches: &ArgMatches, key_manager: &KeyManager) -> Result<(), Box<dyn std::error::Error>> {
-    let fingerprint = matches.value_of("FINGERPRINT").unwrap();
-    info!("Verifying peer fingerprint: {}", fingerprint);
-    
-    // Check if peer exists
-    match key_manager.get_peer(fingerprint) {
-        Some(peer) => {
-            println!("Peer found with fingerprint: {}", fingerprint);
-            
-            // Print peer information
-            println!("\nKey information:");
-            println!("Fingerprint: {}", fingerprint);
-            if let Some(alias) = &peer.alias {
-                println!("Alias: {}", alias);
-            }
-            
-            println!("\nVerify that this fingerprint matches the one provided by your peer.");
-            println!("If it matches, you can trust this peer for secure communications.");
-            
-            // For a real application, we would offer more verification options
-            // Such as QR codes, safety numbers, emojis, etc.
-            
-            info!("Peer verification information displayed");
-            Ok(())
-        },
-        None => {
-            println!("No peer found with fingerprint: {}", fingerprint);
-            error!("No peer found with fingerprint: {}", fingerprint);
-            Err("Peer not found".into())
-        }
-    }
-}
-
-fn remove_peer(matches: &ArgMatches, key_manager: &mut KeyManager) -> Result<(), Box<dyn std::error::Error>> {
-    let fingerprint = matches.value_of("FINGERPRINT").unwrap();
-    info!("Removing peer with fingerprint: {}", fingerprint);
-    
-    // Check if peer exists first
-    if key_manager.get_peer(fingerprint).is_none() {
-        println!("No peer found with fingerprint: {}", fingerprint);
-        error!("No peer found with fingerprint: {}", fingerprint);
-        return Err("Peer notfound".into());
-    }
-    
-    // Ask for confirmation
-    println!("Are you sure you want to remove peer with fingerprint: {}? (y/N)", fingerprint);
-    let mut input = String::new();
-    std::io::stdin().read_line(&mut input)?;
-    
-    if input.trim().to_lowercase() != "y" {
-        println!("Peer removal cancelled.");
-        info!("Peer removal cancelled by user");
-        return Ok(());
-    }
-    
-    // Remove peer
-    match key_manager.remove_peer(fingerprint) {
-        Ok(()) => {
-            println!("Peer removed successfully.");
-            info!("Peer removed successfully: {}", fingerprint);
-            Ok(())
-        },
-        Err(e) => {
-            println!("Failed to remove peer: {:?}", e);
-            error!("Failed to remove peer: {:?}", e);
-            Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to remove peer: {:?}", e))))
-        }
-    }
-}// client/src/cli/commands/peer.rs
+// client/src/cli/commands/peer.rs
 use clap::ArgMatches;
-use log::{debug, error, info, warn};
+use log::{debug, error, info};
 use std::fs::File;
 use std::io::Read;
 use prettytable::{Table, Row, Cell};
@@ -155,4 +87,119 @@ fn list_peers(key_manager: &KeyManager) -> Result<(), Box<dyn std::error::Error>
     
     debug!("Peer list displayed successfully");
     Ok(())
+}
+
+fn add_peer(matches: &ArgMatches, key_manager: &mut KeyManager) -> Result<(), Box<dyn std::error::Error>> {
+    info!("Adding new peer");
+    
+    let key_file = matches.value_of("key-file");
+    let alias = matches.value_of("alias").map(|s| s.to_string());
+    
+    if key_file.is_none() {
+        println!("Error: No key file specified.");
+        error!("No key file specified for add peer command");
+        return Err("No key file specified".into());
+    }
+    
+    let key_path = key_file.unwrap();
+    println!("Reading peer public key from: {}", key_path);
+    info!("Reading peer public key from: {}", key_path);
+    
+    // Read key file
+    let mut file = File::open(key_path)?;
+    let mut key_data = Vec::new();
+    file.read_to_end(&mut key_data)?;
+    
+    debug!("Read {} bytes from key file", key_data.len());
+    
+    // Import key
+    match key_manager.import_peer_key(&key_data, alias) {
+        Ok(fingerprint) => {
+            println!("Peer added successfully with fingerprint: {}", fingerprint);
+            if let Some(alias) = matches.value_of("alias") {
+                println!("Using alias: {}", alias);
+            }
+            
+            info!("Peer added successfully: {}", fingerprint);
+            Ok(())
+        },
+        Err(e) => {
+            println!("Failed to import peer key: {:?}", e);
+            error!("Failed to import peer key: {:?}", e);
+            Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::Other, 
+                format!("Failed to import peer key: {:?}", e)
+            )))
+        }
+    }
+}
+
+fn verify_peer(matches: &ArgMatches, key_manager: &KeyManager) -> Result<(), Box<dyn std::error::Error>> {
+    let fingerprint = matches.value_of("FINGERPRINT").unwrap();
+    info!("Verifying peer fingerprint: {}", fingerprint);
+    
+    // Check if peer exists
+    match key_manager.get_peer(fingerprint) {
+        Some(peer) => {
+            println!("Peer found with fingerprint: {}", fingerprint);
+            
+            // Print peer information
+            println!("\nKey information:");
+            println!("Fingerprint: {}", fingerprint);
+            if let Some(alias) = &peer.alias {
+                println!("Alias: {}", alias);
+            }
+            
+            println!("\nVerify that this fingerprint matches the one provided by your peer.");
+            println!("If it matches, you can trust this peer for secure communications.");
+            
+            // For a real application, we would offer more verification options
+            // Such as QR codes, safety numbers, emojis, etc.
+            
+            info!("Peer verification information displayed");
+            Ok(())
+        },
+        None => {
+            println!("No peer found with fingerprint: {}", fingerprint);
+            error!("No peer found with fingerprint: {}", fingerprint);
+            Err("Peer not found".into())
+        }
+    }
+}
+
+fn remove_peer(matches: &ArgMatches, key_manager: &mut KeyManager) -> Result<(), Box<dyn std::error::Error>> {
+    let fingerprint = matches.value_of("FINGERPRINT").unwrap();
+    info!("Removing peer with fingerprint: {}", fingerprint);
+    
+    // Check if peer exists first
+    if key_manager.get_peer(fingerprint).is_none() {
+        println!("No peer found with fingerprint: {}", fingerprint);
+        error!("No peer found with fingerprint: {}", fingerprint);
+        return Err("Peer not found".into());
+    }
+    
+    // Ask for confirmation
+    println!("Are you sure you want to remove peer with fingerprint: {}? (y/N)", fingerprint);
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    
+    if input.trim().to_lowercase() != "y" {
+        println!("Peer removal cancelled.");
+        info!("Peer removal cancelled by user");
+        return Ok(());
+    }
+    
+    // Remove peer
+    match key_manager.remove_peer(fingerprint) {
+        Ok(()) => {
+            println!("Peer removed successfully.");
+            info!("Peer removed successfully: {}", fingerprint);
+            Ok(())
+        },
+        Err(e) => {
+            println!("Failed to remove peer: {:?}", e);
+            error!("Failed to remove peer: {:?}", e);
+            Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to remove peer: {:?}", e))))
+        }
+    }
 }
