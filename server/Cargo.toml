@@ -39,5 +39,5 @@ name = "secnet_server"
 path = "src/lib.rs"
 
 [[bin]]
-name = "server"
+name = "secnet-server"
 path = "src/main.rs"
