@@ -1,5 +1,5 @@
 use actix_web::{get, post, web, HttpResponse, HttpRequest};
-use log::{info};
+use log::info;
 use sqlx::PgPool;
 use uuid::Uuid;
 use sha2::{Sha256, Digest};

@@ -34,7 +34,7 @@ async fn main() -> std::io::Result<()> {
     // Create database connection pool
     let db_pool = PgPoolOptions::new()
         .max_connections(10)
-        .connect_timeout(Duration::from_secs(5))
+        .acquire_timeout(Duration::from_secs(5))
         .connect(&database_url)
         .await
         .expect("Failed to create database connection pool");

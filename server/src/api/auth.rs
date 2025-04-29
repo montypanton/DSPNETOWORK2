@@ -1,5 +1,5 @@
-use actix_web::{get, post, web, HttpResponse, Responder};
-use log::{info};
+use actix_web::{get, post, web, HttpResponse, Responder, HttpRequest};
+use log::info;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -48,7 +48,7 @@ pub async fn announce(
 #[post("/connection/refresh")]
 pub async fn refresh_token(
     pool: web::Data<PgPool>,
-    req: web::HttpRequest,
+    req: HttpRequest,
 ) -> Result<HttpResponse, ServerError> {
     info!("Received token refresh request");
     
