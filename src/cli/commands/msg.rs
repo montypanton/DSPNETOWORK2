@@ -1,9 +1,11 @@
 // client/src/cli/commands/msg.rs
 use clap::ArgMatches;
-use log::{debug, error, info};
+use log::{debug, error, info, trace, warn};
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::sync::Mutex;
 use tokio::time::sleep;
 use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
@@ -404,10 +406,10 @@ async fn interactive_chat(
         }
     });
     
+    // Create a shared stdin reader that can be accessed from multiple tasks
+    let stdin = Arc::new(Mutex::new(io::stdin()));
+    
     // Start chat loop
-    let mut input = String::new();
-    let stdin = io::stdin();
-    let mut stdout = io::stdout();
     let mut last_check = Instant::now();
     
     loop {
@@ -416,28 +418,28 @@ async fn interactive_chat(
             // Process and display the message
             println!("\r{}: {}", peer_name, String::from_utf8_lossy(&msg.content));
             print!("> ");
-            stdout.flush()?;
+            io::stdout().flush()?;
         }
         
         // Check if we need to prompt for input
         if last_check.elapsed() > Duration::from_millis(100) {
             // Set up input prompt
             print!("> ");
-            stdout.flush()?;
+            io::stdout().flush()?;
             
-            // Set up the input reading
-            input.clear();
+            // Set up the input reading using a clone of the shared stdin
+            let stdin_clone = Arc::clone(&stdin);
             let input_result = tokio::task::spawn_blocking(move || {
                 let mut temp_input = String::new();
-                match stdin.read_line(&mut temp_input) {
+                let mut stdin_guard = stdin_clone.blocking_lock();
+                match stdin_guard.read_line(&mut temp_input) {
                     Ok(_) => Some(temp_input),
                     Err(_) => None,
                 }
             }).await;
             
             if let Ok(Some(user_input)) = input_result {
-                input = user_input;
-                let trimmed = input.trim();
+                let trimmed = user_input.trim();
                 
                 if trimmed == ".exit" {
                     println!("Exiting chat.");

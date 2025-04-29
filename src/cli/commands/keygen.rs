@@ -1,6 +1,6 @@
 // client/src/cli/commands/keygen.rs
 use clap::ArgMatches;
-use log::{debug, error, info, trace, warn};
+use log::{debug, error, info, warn};
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;

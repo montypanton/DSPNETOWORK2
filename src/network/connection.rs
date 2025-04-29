@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::collections::HashMap;
 use tokio::time;
+use sha2::{Digest, Sha256};
 
 use crate::crypto::keys::{IdentityKeyBundle, PreKeyBundle};
 use crate::storage::config::Config;

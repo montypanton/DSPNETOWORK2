@@ -25,10 +25,10 @@ x25519-dalek = "1.2.0"
 chacha20poly1305 = "0.9.0"
 sha2 = "0.10.6"
 hmac = "0.12.1"
-# Use specific rand version compatible with dalek crates
-rand = { version = "0.8.5", package = "rand" }
+# Use both rand versions - 0.7 for compatibility with dalek crates
+rand = "0.8.5"
 rand_07 = { version = "0.7.3", package = "rand" }
-base64 = "0.21.0"
+base64 = { version = "0.21.0", features = ["std"] }
 hex = "0.4.3"
 rpassword = "7.2.0"
 

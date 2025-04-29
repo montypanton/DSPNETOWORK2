@@ -1,6 +1,6 @@
 // client/src/cli/commands/status.rs
 use clap::ArgMatches;
-use log::{debug, error, info, trace, warn};
+use log::{debug, error, info, warn};
 use std::fs;
 use std::path::Path;
 use chrono::{DateTime, Local};

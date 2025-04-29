@@ -1,6 +1,6 @@
 // client/src/cli/commands/connect.rs
 use clap::ArgMatches;
-use log::{debug, error, info, trace, warn};
+use log::{debug, error, info, warn};
 use std::path::Path;
 use std::time::Duration;
 use tokio::time::sleep;

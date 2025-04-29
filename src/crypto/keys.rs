@@ -1,9 +1,12 @@
 // client/src/crypto/keys.rs
 use ed25519_dalek::{Keypair as Ed25519Keypair, PublicKey as Ed25519PublicKey, SecretKey as Ed25519SecretKey};
-use rand::rngs::OsRng;
+use rand_07::rngs::OsRng as OsRng07; // Using rand 0.7 explicitly for ed25519-dalek compatibility
+use rand::{Rng, RngCore}; // Using rand 0.8 for general RNG
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::error::Error as StdError;
+use std::fmt;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::Path;
@@ -69,6 +72,28 @@ pub enum KeyManagerError {
     KeyGenerationError(String),
     KeyNotFound,
     InvalidKey,
+}
+
+impl fmt::Display for KeyManagerError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            KeyManagerError::IoError(e) => write!(f, "I/O error: {}", e),
+            KeyManagerError::SerializationError(e) => write!(f, "Serialization error: {}", e),
+            KeyManagerError::KeyGenerationError(s) => write!(f, "Key generation error: {}", s),
+            KeyManagerError::KeyNotFound => write!(f, "Key not found"),
+            KeyManagerError::InvalidKey => write!(f, "Invalid key"),
+        }
+    }
+}
+
+impl StdError for KeyManagerError {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        match self {
+            KeyManagerError::IoError(e) => Some(e),
+            KeyManagerError::SerializationError(e) => Some(e),
+            _ => None,
+        }
+    }
 }
 
 impl From<std::io::Error> for KeyManagerError {
@@ -174,18 +199,12 @@ impl KeyManager {
     pub fn generate_identity_keys(&mut self, alias: Option<String>) -> Result<&IdentityKeyBundle, KeyManagerError> {
         info!("Generating new identity keys");
         
-        // Generate Ed25519 keypair
+        // Generate Ed25519 keypair - using OsRng from rand 0.7 specifically for ed25519-dalek
         debug!("Generating Ed25519 keypair");
-        let mut csprng = OsRng;
-        let ed25519_keypair = match Ed25519Keypair::generate(&mut csprng) {
-            Ok(keypair) => keypair,
-            Err(e) => {
-                error!("Failed to generate Ed25519 keypair: {}", e);
-                return Err(KeyManagerError::KeyGenerationError(format!("Ed25519 error: {}", e)))
-            }
-        };
+        let mut csprng = OsRng07{};
+        let ed25519_keypair = Ed25519Keypair::generate(&mut csprng);
         
-        // Generate X25519 keypair
+        // Generate X25519 keypair - using OsRng from rand 0.7
         debug!("Generating X25519 keypair");
         let x25519_secret = X25519SecretKey::new(csprng);
         let x25519_public = X25519PublicKey::from(&x25519_secret);
@@ -193,8 +212,8 @@ impl KeyManager {
         // Simulate generating Kyber keypair (in real implementation we'd use pqcrypto-kyber)
         debug!("Generating Kyber keypair (simulated)");
         let mut rng = rand::thread_rng();
-        let kyber_secret_data: [u8; 32] = rand::Rng::gen(&mut rng);
-        let kyber_public_data: [u8; 32] = rand::Rng::gen(&mut rng);
+        let kyber_secret_data: [u8; 32] = rng.gen();
+        let kyber_public_data: [u8; 32] = rng.gen();
         
         let kyber_keypair = KyberKeypair {
             public: KyberPublicKey(kyber_public_data.to_vec()),
@@ -218,7 +237,7 @@ impl KeyManager {
             },
             x25519: IdentityX25519 {
                 public: x25519_public.as_bytes().to_vec(),
-                secret: x25519_secret.as_bytes().to_vec(),
+                secret: x25519_secret.to_bytes().to_vec(),
             },
             kyber: kyber_keypair,
             fingerprint,
@@ -251,15 +270,16 @@ impl KeyManager {
             
             // Generate random key ID
             let mut key_id = [0u8; 16];
-            OsRng.fill_bytes(&mut key_id);
+            rand::thread_rng().fill(&mut key_id);
             
             // Generate X25519 keypair for this prekey
-            let x25519_secret = X25519SecretKey::new(OsRng);
+            let mut csprng = OsRng07{};
+            let x25519_secret = X25519SecretKey::new(csprng);
             let x25519_public = X25519PublicKey::from(&x25519_secret);
             
             // Simulate Kyber keypair for this prekey
             let mut rng = rand::thread_rng();
-            let kyber_public_data: [u8; 32] = rand::Rng::gen(&mut rng);
+            let kyber_public_data: [u8; 32] = rng.gen();
             
             new_prekeys.push(PreKeyBundle {
                 key_id: key_id.to_vec(),
@@ -396,7 +416,7 @@ impl KeyManager {
         
         // Generate random shared secret for simulation
         let mut shared_secret = [0u8; 32];
-        OsRng.fill_bytes(&mut shared_secret);
+        rand::thread_rng().fill(&mut shared_secret);
         
         // Generate root key and chain key
         let mut hasher = Sha256::new();
@@ -537,7 +557,7 @@ impl KeyManager {
         trace!("Message length: {} bytes", message.len());
         
         // Get or create session
-        let session = match self.get_session(peer_fingerprint) {
+        let _session = match self.get_session(peer_fingerprint) {
             Some(session) => {
                 debug!("Using existing session for peer: {}", peer_fingerprint);
                 session.clone()
@@ -587,7 +607,7 @@ impl KeyManager {
         trace!("Encrypted message length: {} bytes", encrypted_message.len());
         
         // Get session
-        let session = match self.get_session(peer_fingerprint) {
+        let _session = match self.get_session(peer_fingerprint) {
             Some(session) => {
                 debug!("Using existing session for peer: {}", peer_fingerprint);
                 session.clone()
