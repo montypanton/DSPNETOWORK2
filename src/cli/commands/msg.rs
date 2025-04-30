@@ -196,6 +196,15 @@ async fn fetch_messages(
     info!("Fetching pending messages from server");
     println!("Fetching pending messages from server...");
     
+    // Get own identity to compare with sender fingerprint
+    let _my_fingerprint = match key_manager.get_identity() {
+        Some(identity) => identity.fingerprint.clone(),
+        None => {
+            error!("No identity found for message fetching");
+            return Err("No identity found".into());
+        }
+    };
+    
     // Fetch messages
     let messages = match server_connection.fetch_messages().await {
         Ok(msgs) => msgs,
@@ -219,32 +228,39 @@ async fn fetch_messages(
     let mut processed_count = 0;
     let mut failed_count = 0;
     
+    // First collect all peer fingerprints to avoid borrowing issues
+    let peer_fingerprints: Vec<String> = key_manager.get_peers().keys().cloned().collect();
+    
     for message in messages {
         debug!("Processing message: {}", message.id);
         
-        // In a real implementation, we would identify the sender from the message
-        // For simulation, we'll assume the recipient_key_hash is actually the sender's fingerprint
-        let sender_fingerprint = message.recipient_key_hash.clone();
+        // We need to determine the sender fingerprint
+        // In a real implementation with proper message structure, the sender would be included in the encrypted message
+        // For this fix, since we don't know the actual sender (it's not in the message),
+        // we'll check all known peers to see if one of them can decrypt the message
         
-        // Check if we know this peer
-        if key_manager.get_peer(&sender_fingerprint).is_none() {
-            warn!("Received message from unknown peer: {}", sender_fingerprint);
-            println!("Warning: Received message from unknown peer: {}", sender_fingerprint);
+        let mut decrypted = None;
+        let mut sender_fingerprint = String::new();
+        
+        // Try to decrypt with each known peer's key
+        for peer_fingerprint in &peer_fingerprints {
+            if let Ok(data) = key_manager.decrypt_message(peer_fingerprint, &message.encrypted_content) {
+                // Successfully decrypted with this peer's key
+                decrypted = Some(data);
+                sender_fingerprint = peer_fingerprint.clone();
+                break;
+            }
+        }
+        
+        // If decryption failed with all peers
+        if decrypted.is_none() {
+            warn!("Failed to decrypt message, couldn't identify sender");
+            println!("Warning: Could not decrypt message: {}", message.id);
             failed_count += 1;
             continue;
         }
         
-        // Decrypt message
-        let decrypted = match key_manager.decrypt_message(&sender_fingerprint, &message.encrypted_content) {
-            Ok(data) => data,
-            Err(e) => {
-                warn!("Failed to decrypt message: {:?}", e);
-                println!("Warning: Failed to decrypt message: {:?}", e);
-                failed_count += 1;
-                continue;
-            }
-        };
-        
+        let decrypted = decrypted.unwrap();
         debug!("Message decrypted successfully, {} bytes", decrypted.len());
         
         // Store message
@@ -252,7 +268,7 @@ async fn fetch_messages(
             config, 
             &StoredMessage {
                 id: message.id.clone(),
-                sender_fingerprint: sender_fingerprint.clone(),
+                sender_fingerprint: sender_fingerprint,
                 content: decrypted,
                 timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
                 read: false,

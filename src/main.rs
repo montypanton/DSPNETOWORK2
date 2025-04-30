@@ -145,6 +145,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     SubCommand::with_name("remove")
                         .about("Remove peer from trusted list")
                         .arg(Arg::with_name("FINGERPRINT").required(true)),
+                )
+                .subcommand(
+                    SubCommand::with_name("init-session")
+                        .about("Initialize secure session with peer")
+                        .arg(Arg::with_name("FINGERPRINT").required(true)),
                 ),
         )
         .subcommand(

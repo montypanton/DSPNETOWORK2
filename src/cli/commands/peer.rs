@@ -38,6 +38,9 @@ pub async fn execute(matches: &ArgMatches, config: &Config) -> Result<(), Box<dy
         Some(("remove", sub_m)) => {
             remove_peer(sub_m, &mut key_manager)?;
         },
+        Some(("init-session", sub_m)) => {
+            initialize_session(sub_m, &mut key_manager)?;
+        },
         _ => {
             println!("Unknown peer subcommand. Use --help for usage information.");
             info!("Unknown peer subcommand specified");
@@ -68,18 +71,25 @@ fn list_peers(key_manager: &KeyManager) -> Result<(), Box<dyn std::error::Error>
         Cell::new("Fingerprint"),
         Cell::new("Alias"),
         Cell::new("Key Type"),
+        Cell::new("Session"),
     ]));
     
     for (fingerprint, peer) in peers {
         let alias = peer.alias.as_deref().unwrap_or("(no alias)");
+        let session_status = if key_manager.get_session(&fingerprint).is_some() {
+            "Active"
+        } else {
+            "None"
+        };
         
         table.add_row(Row::new(vec![
             Cell::new(&fingerprint),
             Cell::new(alias),
             Cell::new("Ed25519/X25519/Kyber"),
+            Cell::new(session_status),
         ]));
         
-        debug!("Peer: fingerprint={}, alias={}", fingerprint, alias);
+        debug!("Peer: fingerprint={}, alias={}, session={}", fingerprint, alias, session_status);
     }
     
     // Print the table
@@ -200,6 +210,43 @@ fn remove_peer(matches: &ArgMatches, key_manager: &mut KeyManager) -> Result<(),
             println!("Failed to remove peer: {:?}", e);
             error!("Failed to remove peer: {:?}", e);
             Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to remove peer: {:?}", e))))
+        }
+    }
+}
+
+// New function for initializing sessions
+fn initialize_session(matches: &ArgMatches, key_manager: &mut KeyManager) -> Result<(), Box<dyn std::error::Error>> {
+    let fingerprint = matches.value_of("FINGERPRINT").unwrap();
+    info!("Initializing session with peer: {}", fingerprint);
+    
+    // Check if peer exists
+    if key_manager.get_peer(fingerprint).is_none() {
+        println!("No peer found with fingerprint: {}", fingerprint);
+        error!("No peer found with fingerprint: {}", fingerprint);
+        return Err("Peer not found".into());
+    }
+    
+    // Check if session already exists
+    if key_manager.get_session(fingerprint).is_some() {
+        println!("Session already exists with peer: {}", fingerprint);
+        info!("Session already exists with peer: {}", fingerprint);
+        return Ok(());
+    }
+    
+    // Initialize session
+    match key_manager.create_session(fingerprint) {
+        Ok(_) => {
+            println!("Session initialized successfully with peer: {}", fingerprint);
+            info!("Session initialized successfully with peer: {}", fingerprint);
+            Ok(())
+        },
+        Err(e) => {
+            println!("Failed to initialize session: {:?}", e);
+            error!("Failed to initialize session: {:?}", e);
+            Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::Other, 
+                format!("Failed to initialize session: {:?}", e)
+            )))
         }
     }
 }
