@@ -4,6 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile  
     platform: linux/amd64
+    container_name: secnet-server
     ports:
       - "8080:8080"
     depends_on:
@@ -12,7 +13,7 @@ services:
     environment:
       - DATABASE_URL=postgres://secnetuser:secnetpassword@db:5432/secnet
       - SERVER_PORT=8080
-      - RUST_LOG=info
+      - RUST_LOG=debug
       - SQLX_OFFLINE=true
     restart: unless-stopped
     networks:
@@ -29,6 +30,7 @@ services:
   db:
     image: postgres:14
     platform: linux/amd64
+    container_name: secnet-db
     environment:
       - POSTGRES_USER=secnetuser
       - POSTGRES_PASSWORD=secnetpassword
