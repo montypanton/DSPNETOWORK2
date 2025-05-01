@@ -1,13 +1,20 @@
 {
   "db": "PostgreSQL",
-  "0123456789abcdef": {
+  "25b41ef8be763090f3b1cc2c8eee1310ace9c1543b1a7b9a1efa9ebb6d340f17": {
     "describe": {
       "columns": [],
       "nullable": [],
       "parameters": {
-        "Left": []
+        "Left": [
+          "Bytea",
+          "Bytea",
+          "Bytea",
+          "Bytea",
+          "Float8",
+          "Int2"
+        ]
       }
     },
-    "query": "-- This is a placeholder for SQLx offline mode"
+    "query": "INSERT INTO pending_messages (id, recipient_key_hash, encrypted_content, hmac, created_at, expiry, is_delivered, priority, delivery_attempts) VALUES (, , , , NOW(), to_timestamp(), FALSE, , 0)"
   }
 }
