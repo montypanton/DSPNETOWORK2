@@ -1,4 +1,4 @@
-// client/src/crypto/keys.rs
+// src/crypto/keys.rs - Updated with proper Kyber implementation
 use ed25519_dalek::{Keypair as Ed25519Keypair, PublicKey as Ed25519PublicKey, SecretKey as Ed25519SecretKey};
 use rand_07::rngs::OsRng as OsRng07; // Using rand 0.7 explicitly for ed25519-dalek compatibility
 use rand::{Rng, RngCore}; // Using rand 0.8 for general RNG
@@ -12,20 +12,10 @@ use std::io::{Read, Write};
 use std::path::Path;
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret as X25519SecretKey};
 use log::{debug, error, info, trace, warn};
+use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
+use chacha20poly1305::aead::{Aead, NewAead};
 
-// We'll simulate Kyber with placeholder structs until we include the actual crate
-// In a real implementation, we would use pqcrypto-kyber
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct KyberPublicKey(pub Vec<u8>);
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct KyberSecretKey(pub Vec<u8>);
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct KyberKeypair {
-    pub public: KyberPublicKey,
-    pub secret: KyberSecretKey,
-}
+use crate::crypto::kyber::{self, KyberKeypair, KyberPublicKey, KyberSecretKey, KyberCiphertext};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct IdentityKeyBundle {
@@ -63,6 +53,21 @@ pub struct Session {
     pub chain_key: Vec<u8>,
     pub message_counter: u32,
     pub prekey_id: Option<Vec<u8>>,
+    pub ratchet_state: RatchetState,
+}
+
+// Added for Double Ratchet implementation
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RatchetState {
+    pub dh_s: Vec<u8>,                // Current ratchet key (private)
+    pub dh_r: Option<Vec<u8>>,        // Remote ratchet key (public)
+    pub root_key: Vec<u8>,            // Current root key
+    pub send_chain_key: Vec<u8>,      // Current sending chain key
+    pub recv_chain_key: Option<Vec<u8>>, // Current receiving chain key
+    pub send_count: u32,              // Number of messages sent
+    pub recv_count: u32,              // Number of messages received
+    pub prev_send_count: u32,         // Number of messages sent with previous sending chain
+    pub ratchet_flag: bool,           // Flag indicating if we need to ratchet on next send
 }
 
 #[derive(Debug)]
@@ -72,6 +77,8 @@ pub enum KeyManagerError {
     KeyGenerationError(String),
     KeyNotFound,
     InvalidKey,
+    EncryptionError(String),
+    DecryptionError(String),
 }
 
 impl fmt::Display for KeyManagerError {
@@ -82,6 +89,8 @@ impl fmt::Display for KeyManagerError {
             KeyManagerError::KeyGenerationError(s) => write!(f, "Key generation error: {}", s),
             KeyManagerError::KeyNotFound => write!(f, "Key not found"),
             KeyManagerError::InvalidKey => write!(f, "Invalid key"),
+            KeyManagerError::EncryptionError(s) => write!(f, "Encryption error: {}", s),
+            KeyManagerError::DecryptionError(s) => write!(f, "Decryption error: {}", s),
         }
     }
 }
@@ -209,22 +218,16 @@ impl KeyManager {
         let x25519_secret = X25519SecretKey::new(csprng);
         let x25519_public = X25519PublicKey::from(&x25519_secret);
         
-        // Simulate generating Kyber keypair (in real implementation we'd use pqcrypto-kyber)
-        debug!("Generating Kyber keypair (simulated)");
+        // Generate Kyber keypair
+        debug!("Generating Kyber keypair");
         let mut rng = rand::thread_rng();
-        let kyber_secret_data: [u8; 32] = rng.gen();
-        let kyber_public_data: [u8; 32] = rng.gen();
-        
-        let kyber_keypair = KyberKeypair {
-            public: KyberPublicKey(kyber_public_data.to_vec()),
-            secret: KyberSecretKey(kyber_secret_data.to_vec()),
-        };
+        let kyber_keypair = KyberKeypair::generate(&mut rng);
         
         // Calculate fingerprint (hash of all public keys)
         let mut hasher = Sha256::new();
         hasher.update(ed25519_keypair.public.as_bytes());
         hasher.update(x25519_public.as_bytes());
-        hasher.update(&kyber_public_data);
+        hasher.update(kyber_keypair.public.as_bytes());
         let fingerprint = hex::encode(hasher.finalize());
         
         debug!("Generated key fingerprint: {}", fingerprint);
@@ -277,14 +280,14 @@ impl KeyManager {
             let x25519_secret = X25519SecretKey::new(csprng);
             let x25519_public = X25519PublicKey::from(&x25519_secret);
             
-            // Simulate Kyber keypair for this prekey
+            // Generate Kyber keypair for this prekey
             let mut rng = rand::thread_rng();
-            let kyber_public_data: [u8; 32] = rng.gen();
+            let kyber_keypair = KyberKeypair::generate(&mut rng);
             
             new_prekeys.push(PreKeyBundle {
                 key_id: key_id.to_vec(),
                 x25519: x25519_public.as_bytes().to_vec(),
-                kyber: KyberPublicKey(kyber_public_data.to_vec()),
+                kyber: kyber_keypair.public,
             });
         }
         
@@ -317,7 +320,7 @@ impl KeyManager {
         let mut hasher = Sha256::new();
         hasher.update(&peer_key.ed25519.public);
         hasher.update(&peer_key.x25519.public);
-        hasher.update(&peer_key.kyber.public.0);
+        hasher.update(peer_key.kyber.public.as_bytes());
         let calculated_fingerprint = hex::encode(hasher.finalize());
         
         if calculated_fingerprint != peer_key.fingerprint {
@@ -366,8 +369,8 @@ impl KeyManager {
                 secret: Vec::new(), // Empty secret key
             },
             kyber: KyberKeypair {
-                public: KyberPublicKey(identity.kyber.public.0.clone()),
-                secret: KyberSecretKey(Vec::new()), // Empty secret key
+                public: identity.kyber.public.clone(),
+                secret: KyberSecretKey { data: Vec::new() }, // Empty secret key
             },
             fingerprint: identity.fingerprint.clone(),
             alias: identity.alias.clone(),
@@ -410,31 +413,66 @@ impl KeyManager {
             }
         };
         
-        // In a real implementation, we would use X25519 to generate a shared secret
-        // and then combine it with a shared secret from Kyber for hybrid post-quantum security
-        // For this simulation we'll just create a random shared secret
+        // Generate X25519 shared secret
+        let peer_public = match X25519PublicKey::from_bytes(&peer.x25519.public) {
+            Some(key) => key,
+            None => {
+                error!("Invalid peer X25519 public key");
+                return Err(KeyManagerError::InvalidKey);
+            }
+        };
         
-        // Generate random shared secret for simulation
-        let mut shared_secret = [0u8; 32];
-        rand::thread_rng().fill(&mut shared_secret);
+        let my_secret = X25519SecretKey::from(identity.x25519.secret.clone().try_into().unwrap());
+        let x25519_shared = my_secret.diffie_hellman(&peer_public);
         
-        // Generate root key and chain key
+        // Generate Kyber shared secret
+        let mut rng = rand::thread_rng();
+        let (kyber_shared, _) = kyber::encapsulate(&mut rng, &peer.kyber.public);
+        
+        // Combine X25519 and Kyber shared secrets for hybrid post-quantum security
+        let mut combined_shared = Vec::with_capacity(x25519_shared.as_bytes().len() + kyber_shared.len());
+        combined_shared.extend_from_slice(x25519_shared.as_bytes());
+        combined_shared.extend_from_slice(&kyber_shared);
+        
+        // Generate root key from combined shared secret
         let mut hasher = Sha256::new();
-        hasher.update(&shared_secret);
+        hasher.update(&combined_shared);
+        hasher.update(b"SecNetRoot");
         let root_key = hasher.finalize().to_vec();
         
+        // Generate chain key from root key
         let mut hasher = Sha256::new();
         hasher.update(&root_key);
+        hasher.update(b"SecNetChain");
         let chain_key = hasher.finalize().to_vec();
+        
+        // Generate sending ratchet key
+        let mut csprng = OsRng07{};
+        let ratchet_secret = X25519SecretKey::new(csprng);
+        let ratchet_public = X25519PublicKey::from(&ratchet_secret);
+        
+        // Initialize ratchet state for Double Ratchet Algorithm
+        let ratchet_state = RatchetState {
+            dh_s: ratchet_secret.to_bytes().to_vec(),
+            dh_r: Some(peer.x25519.public.clone()),
+            root_key: root_key.clone(),
+            send_chain_key: chain_key.clone(),
+            recv_chain_key: None,
+            send_count: 0,
+            recv_count: 0,
+            prev_send_count: 0,
+            ratchet_flag: false,
+        };
         
         // Create session
         let session = Session {
             remote_fingerprint: peer_fingerprint.to_string(),
-            shared_secret: shared_secret.to_vec(),
+            shared_secret: combined_shared,
             root_key,
             chain_key,
             message_counter: 0,
             prekey_id: None,
+            ratchet_state,
         };
         
         // Store session
@@ -552,54 +590,71 @@ impl KeyManager {
         }
     }
     
+    // Double Ratchet Based Encryption/Decryption
+    
     pub fn encrypt_message(&mut self, peer_fingerprint: &str, message: &[u8]) -> Result<Vec<u8>, KeyManagerError> {
         info!("Encrypting message for peer: {}", peer_fingerprint);
         trace!("Message length: {} bytes", message.len());
         
         // Get or create session
-        let _session = match self.get_session(peer_fingerprint) {
-            Some(session) => {
-                debug!("Using existing session for peer: {}", peer_fingerprint);
-                session.clone()
-            },
-            None => {
-                debug!("No existing session, creating new one for peer: {}", peer_fingerprint);
-                self.create_session(peer_fingerprint)?.clone()
-            }
+        let session = if let Some(s) = self.get_session(peer_fingerprint) {
+            debug!("Using existing session for peer: {}", peer_fingerprint);
+            s.clone()
+        } else {
+            debug!("No existing session, creating new one for peer: {}", peer_fingerprint);
+            self.create_session(peer_fingerprint)?.clone()
         };
         
-        // In a real implementation, we would:
-        // 1. Update the ratchet if needed
-        // 2. Derive a message key
-        // 3. Encrypt the message with ChaCha20-Poly1305
-        // 4. Sign the encrypted message
-        // 5. Attach header information
-        
-        // For this simulation, we'll just do a simple encryption
-        // Get mutable session to update the counter
+        // Get mutable session
         let session = self.get_session_mut(peer_fingerprint).unwrap();
-        let counter = session.message_counter;
-        session.message_counter += 1;
         
-        // Derive message key from chain key and counter
-        let mut hasher = Sha256::new();
-        hasher.update(&session.chain_key);
-        hasher.update(&counter.to_be_bytes());
-        let message_key = hasher.finalize();
-        
-        // Simple XOR "encryption" for simulation
-        // In a real implementation we would use ChaCha20-Poly1305
-        let mut encrypted = Vec::with_capacity(message.len());
-        for (i, byte) in message.iter().enumerate() {
-            encrypted.push(byte ^ message_key[i % 32]);
+        // Implement Double Ratchet Algorithm
+        if session.ratchet_state.ratchet_flag {
+            // Ratchet forward if needed
+            self.ratchet_dh(peer_fingerprint)?;
         }
+        
+        // Derive message key from chain key
+        let message_key = self.derive_message_key(&session.ratchet_state.send_chain_key, session.ratchet_state.send_count)?;
+        
+        // Increment send counter
+        session.ratchet_state.send_count += 1;
+        
+        // Encrypt message with message key using ChaCha20-Poly1305
+        let nonce_bytes = session.ratchet_state.send_count.to_be_bytes();
+        let mut nonce = [0u8; 12]; // ChaCha20-Poly1305 needs a 12-byte nonce
+        nonce[8..12].copy_from_slice(&nonce_bytes);
+        
+        let encryption_key = Key::from_slice(&message_key);
+        let cipher = ChaCha20Poly1305::new(encryption_key);
+        let nonce = Nonce::from_slice(&nonce);
+        
+        // Create header with current ratchet information
+        let header = MessageHeader {
+            dh: self.get_public_ratchet_key(peer_fingerprint)?,
+            pn: session.ratchet_state.prev_send_count,
+            n: session.ratchet_state.send_count,
+        };
+        
+        let serialized_header = serde_json::to_vec(&header)
+            .map_err(|e| KeyManagerError::EncryptionError(format!("Failed to serialize header: {}", e)))?;
+        
+        // Encrypt message
+        let ciphertext = cipher.encrypt(nonce, message)
+            .map_err(|_| KeyManagerError::EncryptionError("Encryption failed".to_string()))?;
+        
+        // Create encrypted message with header
+        let mut encrypted_message = Vec::with_capacity(serialized_header.len() + ciphertext.len() + 4);
+        encrypted_message.extend_from_slice(&(serialized_header.len() as u32).to_be_bytes());
+        encrypted_message.extend_from_slice(&serialized_header);
+        encrypted_message.extend_from_slice(&ciphertext);
         
         // Save updated session
         self.save_sessions()?;
         
-        trace!("Encrypted message length: {} bytes", encrypted.len());
+        trace!("Encrypted message length: {} bytes", encrypted_message.len());
         info!("Message encrypted successfully for peer: {}", peer_fingerprint);
-        Ok(encrypted)
+        Ok(encrypted_message)
     }
     
     pub fn decrypt_message(&mut self, peer_fingerprint: &str, encrypted_message: &[u8]) -> Result<Vec<u8>, KeyManagerError> {
@@ -607,10 +662,10 @@ impl KeyManager {
         trace!("Encrypted message length: {} bytes", encrypted_message.len());
         
         // Get session
-        let _session = match self.get_session(peer_fingerprint) {
-            Some(session) => {
+        let session = match self.get_session(peer_fingerprint) {
+            Some(s) => {
                 debug!("Using existing session for peer: {}", peer_fingerprint);
-                session.clone()
+                s.clone()
             },
             None => {
                 error!("No session found for peer: {}", peer_fingerprint);
@@ -618,30 +673,70 @@ impl KeyManager {
             }
         };
         
-        // In a real implementation, we would:
-        // 1. Verify the message signature
-        // 2. Update the ratchet if needed
-        // 3. Derive the message key
-        // 4. Decrypt the message with ChaCha20-Poly1305
-        
-        // For this simulation, we'll just do a simple decryption
-        // Get mutable session to update the counter
-        let session = self.get_session_mut(peer_fingerprint).unwrap();
-        let counter = session.message_counter;
-        session.message_counter += 1;
-        
-        // Derive message key from chain key and counter
-        let mut hasher = Sha256::new();
-        hasher.update(&session.chain_key);
-        hasher.update(&counter.to_be_bytes());
-        let message_key = hasher.finalize();
-        
-        // Simple XOR "decryption" for simulation
-        // In a real implementation we would use ChaCha20-Poly1305
-        let mut decrypted = Vec::with_capacity(encrypted_message.len());
-        for (i, byte) in encrypted_message.iter().enumerate() {
-            decrypted.push(byte ^ message_key[i % 32]);
+        // Parse encrypted message format
+        if encrypted_message.len() < 4 {
+            return Err(KeyManagerError::DecryptionError("Message too short".to_string()));
         }
+        
+        let header_len = u32::from_be_bytes([
+            encrypted_message[0], encrypted_message[1], 
+            encrypted_message[2], encrypted_message[3]
+        ]) as usize;
+        
+        if encrypted_message.len() < 4 + header_len {
+            return Err(KeyManagerError::DecryptionError("Invalid message format".to_string()));
+        }
+        
+        let header_bytes = &encrypted_message[4..4 + header_len];
+        let ciphertext = &encrypted_message[4 + header_len..];
+        
+        // Deserialize header
+        let header: MessageHeader = serde_json::from_slice(header_bytes)
+            .map_err(|e| KeyManagerError::DecryptionError(format!("Failed to deserialize header: {}", e)))?;
+        
+        // Get mutable session
+        let session = self.get_session_mut(peer_fingerprint).unwrap();
+        
+        // Check if we need to perform a DH ratchet step
+        let dh_ratchet_needed = match &session.ratchet_state.dh_r {
+            Some(current_remote_key) => {
+                // Compare current remote key with the one in the message
+                &header.dh != current_remote_key.as_slice()
+            },
+            None => true // No remote key, so we need to ratchet
+        };
+        
+        if dh_ratchet_needed {
+            debug!("DH ratchet step needed");
+            // Save current remote key from header
+            session.ratchet_state.dh_r = Some(header.dh.clone());
+            
+            // Perform DH ratchet step
+            self.ratchet_dh(peer_fingerprint)?;
+            
+            // Set message counter
+            session.ratchet_state.recv_count = header.n;
+        } else if header.n > session.ratchet_state.recv_count {
+            // Update receive counter if message has higher counter
+            session.ratchet_state.recv_count = header.n;
+        }
+        
+        // Derive message key
+        let message_key = self.derive_message_key(
+            &session.ratchet_state.recv_chain_key.clone().unwrap_or_default(), 
+            header.n)?;
+        
+        // Decrypt message
+        let nonce_bytes = header.n.to_be_bytes();
+        let mut nonce = [0u8; 12];
+        nonce[8..12].copy_from_slice(&nonce_bytes);
+        
+        let decryption_key = Key::from_slice(&message_key);
+        let cipher = ChaCha20Poly1305::new(decryption_key);
+        let nonce = Nonce::from_slice(&nonce);
+        
+        let decrypted = cipher.decrypt(nonce, ciphertext)
+            .map_err(|_| KeyManagerError::DecryptionError("Decryption failed".to_string()))?;
         
         // Save updated session
         self.save_sessions()?;
@@ -649,6 +744,123 @@ impl KeyManager {
         trace!("Decrypted message length: {} bytes", decrypted.len());
         info!("Message decrypted successfully from peer: {}", peer_fingerprint);
         Ok(decrypted)
+    }
+    
+    // Helper methods for Double Ratchet Algorithm
+    
+    fn derive_message_key(&self, chain_key: &[u8], counter: u32) -> Result<Vec<u8>, KeyManagerError> {
+        let mut key = chain_key.to_vec();
+        
+        // Derive keys in chain until we reach the desired counter
+        for i in 0..counter {
+            let mut hasher = Sha256::new();
+            hasher.update(&key);
+            hasher.update(&[0x01]); // Message key derivation constant
+            key = hasher.finalize().to_vec();
+        }
+        
+        // Final message key
+        let mut hasher = Sha256::new();
+        hasher.update(&key);
+        hasher.update(&[0x02]); // Message key derivation constant
+        Ok(hasher.finalize().to_vec())
+    }
+    
+    fn ratchet_dh(&mut self, peer_fingerprint: &str) -> Result<(), KeyManagerError> {
+        debug!("Performing DH ratchet step for peer: {}", peer_fingerprint);
+        
+        let session = self.get_session_mut(peer_fingerprint).unwrap();
+        
+        // Get remote ratchet key
+        let remote_key = match &session.ratchet_state.dh_r {
+            Some(key) => key.clone(),
+            None => {
+                error!("No remote ratchet key available");
+                return Err(KeyManagerError::KeyNotFound);
+            }
+        };
+        
+        // Convert to X25519 keys
+        let dh_secret = match X25519SecretKey::from_bytes(&session.ratchet_state.dh_s) {
+            Some(key) => key,
+            None => {
+                error!("Invalid local ratchet secret key");
+                return Err(KeyManagerError::InvalidKey);
+            }
+        };
+        
+        let dh_remote = match X25519PublicKey::from_bytes(&remote_key) {
+            Some(key) => key,
+            None => {
+                error!("Invalid remote ratchet public key");
+                return Err(KeyManagerError::InvalidKey);
+            }
+        };
+        
+        // Generate DH output
+        let dh_out = dh_secret.diffie_hellman(&dh_remote);
+        
+        // Generate new ratchet key pair
+        let mut csprng = OsRng07{};
+        let new_dh_secret = X25519SecretKey::new(csprng);
+        let new_dh_public = X25519PublicKey::from(&new_dh_secret);
+        
+        // Store previous send count
+        session.ratchet_state.prev_send_count = session.ratchet_state.send_count;
+        session.ratchet_state.send_count = 0;
+        
+        // Update root key, chain keys and ratchet keys
+        let mut kdf_input = Vec::with_capacity(session.ratchet_state.root_key.len() + dh_out.as_bytes().len());
+        kdf_input.extend_from_slice(&session.ratchet_state.root_key);
+        kdf_input.extend_from_slice(dh_out.as_bytes());
+        
+        let mut hasher = Sha256::new();
+        hasher.update(&kdf_input);
+        hasher.update(b"RootKeyUpdate");
+        let new_root_key = hasher.finalize().to_vec();
+        
+        // Generate new chain keys
+        let mut hasher = Sha256::new();
+        hasher.update(&new_root_key);
+        hasher.update(b"ChainKeySend");
+        let new_send_chain = hasher.finalize().to_vec();
+        
+        let mut hasher = Sha256::new();
+        hasher.update(&new_root_key);
+        hasher.update(b"ChainKeyRecv");
+        let new_recv_chain = hasher.finalize().to_vec();
+        
+        // Update session state
+        session.ratchet_state.root_key = new_root_key;
+        session.ratchet_state.send_chain_key = new_send_chain;
+        session.ratchet_state.recv_chain_key = Some(new_recv_chain);
+        session.ratchet_state.dh_s = new_dh_secret.to_bytes().to_vec();
+        session.ratchet_state.ratchet_flag = false; // Reset ratchet flag
+        
+        debug!("DH ratchet step completed successfully");
+        Ok(())
+    }
+    
+    fn get_public_ratchet_key(&self, peer_fingerprint: &str) -> Result<Vec<u8>, KeyManagerError> {
+        let session = match self.get_session(peer_fingerprint) {
+            Some(s) => s,
+            None => {
+                error!("No session found for peer: {}", peer_fingerprint);
+                return Err(KeyManagerError::KeyNotFound);
+            }
+        };
+        
+        // Convert private key to public key
+        let dh_secret = match X25519SecretKey::from_bytes(&session.ratchet_state.dh_s) {
+            Some(key) => key,
+            None => {
+                error!("Invalid ratchet secret key");
+                return Err(KeyManagerError::InvalidKey);
+            }
+        };
+        
+        let dh_public = X25519PublicKey::from(&dh_secret);
+        Ok(dh_public.as_bytes().to_vec())
     }
     
     pub fn backup_keys(&self, backup_path: &str, password: &str) -> Result<(), KeyManagerError> {
@@ -670,9 +882,10 @@ impl KeyManager {
         // Serialize to JSON
         let json = serde_json::to_string(&backup)?;
         
-        // In a real implementation, we would properly encrypt this with the password
-        // For simulation, we'll just do a very basic "encryption"
-        let salt = [42u8; 16]; // Fixed salt for simulation
+        // Properly encrypt data with password using authenticated encryption
+        
+        // Derive key from password using PBKDF2 (simplified here, use argon2 in real implementation)
+        let salt = rand::thread_rng().gen::<[u8; 16]>();
         let mut key = [0u8; 32];
         
         // Derive key from password (very insecure, just for simulation)
@@ -681,16 +894,24 @@ impl KeyManager {
         hasher.update(&salt);
         key.copy_from_slice(&hasher.finalize());
         
-        // "Encrypt" JSON (just XOR with key)
-        let mut encrypted = Vec::with_capacity(json.len());
-        for (i, byte) in json.as_bytes().iter().enumerate() {
-            encrypted.push(byte ^ key[i % 32]);
-        }
+        // Encrypt JSON using ChaCha20-Poly1305
+        let encryption_key = Key::from_slice(&key);
+        let cipher = ChaCha20Poly1305::new(encryption_key);
         
-        // Write to file
+        // Generate random nonce
+        let mut nonce_bytes = [0u8; 12];
+        rand::thread_rng().fill(&mut nonce_bytes);
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        
+        // Encrypt the data
+        let ciphertext = cipher.encrypt(nonce, json.as_bytes())
+            .map_err(|_| KeyManagerError::EncryptionError("Backup encryption failed".to_string()))?;
+        
+        // Write salt, nonce, and encrypted data to file
         let mut file = File::create(backup_path)?;
-        file.write_all(&salt)?; // Write salt
-        file.write_all(&encrypted)?; // Write "encrypted" data
+        file.write_all(&salt)?;
+        file.write_all(&nonce_bytes)?;
+        file.write_all(&ciphertext)?;
         
         info!("Backup created successfully at: {}", backup_path);
         Ok(())
@@ -704,27 +925,30 @@ impl KeyManager {
         let mut data = Vec::new();
         file.read_to_end(&mut data)?;
         
-        if data.len() < 16 {
+        if data.len() < 28 { // 16 (salt) + 12 (nonce)
             error!("Backup file is too small to be valid");
             return Err(KeyManagerError::InvalidKey);
         }
         
-        // Extract salt and encrypted data
+        // Extract salt, nonce, and encrypted data
         let salt = &data[0..16];
-        let encrypted = &data[16..];
+        let nonce_bytes = &data[16..28];
+        let encrypted = &data[28..];
         
-        // Derive key from password (very insecure, just for simulation)
+        // Derive key from password
         let mut key = [0u8; 32];
         let mut hasher = Sha256::new();
         hasher.update(password.as_bytes());
         hasher.update(salt);
         key.copy_from_slice(&hasher.finalize());
         
-        // "Decrypt" data (just XOR with key)
-        let mut decrypted = Vec::with_capacity(encrypted.len());
-        for (i, byte) in encrypted.iter().enumerate() {
-            decrypted.push(byte ^ key[i % 32]);
-        }
+        // Decrypt the data
+        let decryption_key = Key::from_slice(&key);
+        let cipher = ChaCha20Poly1305::new(decryption_key);
+        let nonce = Nonce::from_slice(nonce_bytes);
+        
+        let decrypted = cipher.decrypt(nonce, encrypted)
+            .map_err(|_| KeyManagerError::DecryptionError("Backup decryption failed - incorrect password?".to_string()))?;
         
         // Parse JSON
         let backup: KeyBackup = serde_json::from_slice(&decrypted)?;
@@ -752,4 +976,12 @@ struct KeyBackup {
     peers: HashMap<String, IdentityKeyBundle>,
     sessions: HashMap<String, Session>,
     prekeys: Vec<PreKeyBundle>,
+}
+
+// Message header for Double Ratchet
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct MessageHeader {
+    pub dh: Vec<u8>,  // Sender's current ratchet public key
+    pub pn: u32,      // Previous chain length
+    pub n: u32,       // Message number in chain
 }

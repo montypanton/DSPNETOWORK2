@@ -9,6 +9,7 @@ mod cli;
 mod crypto;
 mod network;
 mod storage;
+mod utils;
 
 use cli::commands;
 use storage::config::Config;
