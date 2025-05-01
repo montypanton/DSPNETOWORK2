@@ -15,7 +15,7 @@ actix-rt = "2.8.0"
 tokio = { version = "1.28.0", features = ["full"] }
 
 # Database
-sqlx = { version = "0.6.3", features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "time", "migrate", "offline"] }
+sqlx = { version = "0.6.3", features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "time", "migrate", "offline", "bigdecimal"] }
 
 # Utilities
 dotenv = "0.15.0"
@@ -30,6 +30,7 @@ derive_more = "0.99.17"
 
 # Cryptography
 sha2 = { version = "0.10.6", features = ["std"] }
+sha3 = "0.10.6"
 hex = "0.4.3"
 base64 = "0.21.0"
 rand = "0.8.5"

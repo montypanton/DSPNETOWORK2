@@ -16,7 +16,7 @@ pub struct AnnouncementResponse {
 }
 
 // Prekey models
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PreKeyBundle {
     pub key_id: Vec<u8>,
     pub x25519: Vec<u8>,
@@ -52,7 +52,7 @@ pub struct SendMessageResponse {
     pub status: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub id: String,
     pub recipient_key_hash: String,
@@ -67,7 +67,7 @@ pub struct FetchMessagesResponse {
 }
 
 // Topic models
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Topic {
     pub hash: String,
     pub created_at: u64,
@@ -95,6 +95,16 @@ pub struct SendTopicMessageRequest {
     pub topic_hash: String,
     pub encrypted_content: Vec<u8>,
     pub expiry: Option<u64>, // Optional TTL in seconds
+}
+
+// Added TopicMessage struct for topic messaging
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TopicMessage {
+    pub id: String,
+    pub topic_hash: String,
+    pub encrypted_content: Vec<u8>,
+    pub posted_at: u64,
+    pub expiry: u64,
 }
 
 // Helper function to get current timestamp
