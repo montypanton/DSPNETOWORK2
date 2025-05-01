@@ -3,7 +3,8 @@
 
 use log::{debug, info, warn};
 use rand::{Rng, thread_rng};
-use sha2::{Digest, Sha3_256, Sha3_512};
+use sha2::Digest;
+use sha3::{Sha3_256, Sha3_512};
 use std::time::{SystemTime, UNIX_EPOCH};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use chacha20poly1305::aead::{Aead, NewAead};

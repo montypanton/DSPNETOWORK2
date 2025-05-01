@@ -10,7 +10,8 @@
 
 use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha3_512, Sha256};
+use sha2::{Digest, Sha256};
+use sha3::Sha3_512;
 use std::convert::TryInto;
 
 // Constants for Kyber-768 (a reasonable security level)
@@ -143,11 +144,11 @@ fn compress(poly: &[i16], d: usize) -> Vec<u8> {
             if d == 10 { // du
                 if j < 4 {
                     result[5*i + j/4*5 + j%4] = compressed & 0xff;
-                    result[5*i + j/4*5 + 4] |= (compressed >> 8) << (2*j);
+                    result[5*i + j/4*5 + 4] |= ((compressed >> 8) & 0xFF) << (2*j);
                 } else {
                     result[5*i + (j-4)/4*5 + (j-4)%4] |= (compressed & 0x3) << 6;
                     result[5*i + (j-4)/4*5 + (j-4)%4 + 1] = (compressed >> 2) & 0xff;
-                    result[5*i + (j-4)/4*5 + 4] |= (compressed >> 10) << (2*(j-4) + 1);
+                    result[5*i + (j-4)/4*5 + 4] |= ((compressed >> 10) & 0xFF) << (2*(j-4) + 1);
                 }
             } else if d == 4 { // dv
                 result[i*4 + j/2] |= (compressed << (4*(j%2))) & 0xff;
@@ -169,17 +170,17 @@ fn decompress(bytes: &[u8], d: usize) -> Vec<i16> {
             if d == 10 { // du
                 if j < 4 {
                     compressed = bytes[5*i + j/4*5 + j%4] as u16;
-                    compressed |= ((bytes[5*i + j/4*5 + 4] >> (2*j)) & 0x3) << 8;
+                    compressed |= (((bytes[5*i + j/4*5 + 4] >> (2*j)) & 0x3) as u16) << 8;
                 } else {
                     compressed = ((bytes[5*i + (j-4)/4*5 + (j-4)%4] >> 6) & 0x3) as u16;
                     compressed |= (bytes[5*i + (j-4)/4*5 + (j-4)%4 + 1] as u16) << 2;
-                    compressed |= ((bytes[5*i + (j-4)/4*5 + 4] >> (2*(j-4) + 1)) & 0x1) << 10;
+                    compressed |= (((bytes[5*i + (j-4)/4*5 + 4] >> (2*(j-4) + 1)) & 0x1) as u16) << 10;
                 }
             } else if d == 4 { // dv
                 compressed = ((bytes[i*4 + j/2] >> (4*(j%2))) & 0xf) as u16;
             }
             
-            poly[8*i + j] = ((compressed * KYBER_Q as u16) + (1 << (d-1))) >> d;
+            poly[8*i + j] = (((compressed * KYBER_Q as u16) + (1 << (d-1))) >> d) as i16;
         }
     }
     

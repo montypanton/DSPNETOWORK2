@@ -414,10 +414,10 @@ impl KeyManager {
         };
         
         // Generate X25519 shared secret
-        let peer_public = match X25519PublicKey::from_bytes(&peer.x25519.public) {
-            Some(key) => key,
-            None => {
-                error!("Invalid peer X25519 public key");
+        let peer_public = match <[u8; 32]>::try_from(&peer.x25519.public[..]) {
+            Ok(array) => X25519PublicKey::from(array),
+            Err(_) => {
+                error!("Invalid peer X25519 public key length");
                 return Err(KeyManagerError::InvalidKey);
             }
         };
@@ -766,14 +766,27 @@ impl KeyManager {
         Ok(hasher.finalize().to_vec())
     }
     
-    fn ratchet_dh(&mut self, peer_fingerprint: &str) -> Result<(), KeyManagerError> {
+    pub fn ratchet_dh(&mut self, peer_fingerprint: &str) -> Result<(), KeyManagerError> {
         debug!("Performing DH ratchet step for peer: {}", peer_fingerprint);
         
-        let session = self.get_session_mut(peer_fingerprint).unwrap();
+        // Clone the necessary data from the session to avoid double borrowing
+        let session_data = {
+            let session = self.get_session_mut(peer_fingerprint)
+                .ok_or_else(|| KeyManagerError::KeyNotFound)?;
+                
+            // Clone the data we need
+            (
+                session.ratchet_state.dh_s.clone(),
+                session.ratchet_state.dh_r.clone(),
+                session.ratchet_state.root_key.clone()
+            )
+        };
+        
+        let (dh_s, dh_r_opt, root_key) = session_data;
         
         // Get remote ratchet key
-        let remote_key = match &session.ratchet_state.dh_r {
-            Some(key) => key.clone(),
+        let remote_key = match dh_r_opt {
+            Some(key) => key,
             None => {
                 error!("No remote ratchet key available");
                 return Err(KeyManagerError::KeyNotFound);
@@ -781,17 +794,17 @@ impl KeyManager {
         };
         
         // Convert to X25519 keys
-        let dh_secret = match X25519SecretKey::from_bytes(&session.ratchet_state.dh_s) {
-            Some(key) => key,
-            None => {
+        let dh_secret = match <[u8; 32]>::try_from(&dh_s[..]) {
+            Ok(array) => X25519SecretKey::from(array),
+            Err(_) => {
                 error!("Invalid local ratchet secret key");
                 return Err(KeyManagerError::InvalidKey);
             }
         };
         
-        let dh_remote = match X25519PublicKey::from_bytes(&remote_key) {
-            Some(key) => key,
-            None => {
+        let dh_remote = match <[u8; 32]>::try_from(&remote_key[..]) {
+            Ok(array) => X25519PublicKey::from(array),
+            Err(_) => {
                 error!("Invalid remote ratchet public key");
                 return Err(KeyManagerError::InvalidKey);
             }
@@ -801,41 +814,47 @@ impl KeyManager {
         let dh_out = dh_secret.diffie_hellman(&dh_remote);
         
         // Generate new ratchet key pair
-        let mut csprng = OsRng07{};
+        let csprng = OsRng07{};
         let new_dh_secret = X25519SecretKey::new(csprng);
         let new_dh_public = X25519PublicKey::from(&new_dh_secret);
         
-        // Store previous send count
-        session.ratchet_state.prev_send_count = session.ratchet_state.send_count;
-        session.ratchet_state.send_count = 0;
-        
-        // Update root key, chain keys and ratchet keys
-        let mut kdf_input = Vec::with_capacity(session.ratchet_state.root_key.len() + dh_out.as_bytes().len());
-        kdf_input.extend_from_slice(&session.ratchet_state.root_key);
-        kdf_input.extend_from_slice(dh_out.as_bytes());
-        
-        let mut hasher = Sha256::new();
-        hasher.update(&kdf_input);
-        hasher.update(b"RootKeyUpdate");
-        let new_root_key = hasher.finalize().to_vec();
-        
-        // Generate new chain keys
-        let mut hasher = Sha256::new();
-        hasher.update(&new_root_key);
-        hasher.update(b"ChainKeySend");
-        let new_send_chain = hasher.finalize().to_vec();
-        
-        let mut hasher = Sha256::new();
-        hasher.update(&new_root_key);
-        hasher.update(b"ChainKeyRecv");
-        let new_recv_chain = hasher.finalize().to_vec();
-        
-        // Update session state
-        session.ratchet_state.root_key = new_root_key;
-        session.ratchet_state.send_chain_key = new_send_chain;
-        session.ratchet_state.recv_chain_key = Some(new_recv_chain);
-        session.ratchet_state.dh_s = new_dh_secret.to_bytes().to_vec();
-        session.ratchet_state.ratchet_flag = false; // Reset ratchet flag
+        // Now update the session with new keys
+        {
+            let session = self.get_session_mut(peer_fingerprint)
+                .ok_or_else(|| KeyManagerError::KeyNotFound)?;
+            
+            // Store previous send count
+            session.ratchet_state.prev_send_count = session.ratchet_state.send_count;
+            session.ratchet_state.send_count = 0;
+            
+            // Update root key, chain keys and ratchet keys
+            let mut kdf_input = Vec::with_capacity(root_key.len() + dh_out.as_bytes().len());
+            kdf_input.extend_from_slice(&root_key);
+            kdf_input.extend_from_slice(dh_out.as_bytes());
+            
+            let mut hasher = Sha256::new();
+            hasher.update(&kdf_input);
+            hasher.update(b"RootKeyUpdate");
+            let new_root_key = hasher.finalize().to_vec();
+            
+            // Generate new chain keys
+            let mut hasher = Sha256::new();
+            hasher.update(&new_root_key);
+            hasher.update(b"ChainKeySend");
+            let new_send_chain = hasher.finalize().to_vec();
+            
+            let mut hasher = Sha256::new();
+            hasher.update(&new_root_key);
+            hasher.update(b"ChainKeyRecv");
+            let new_recv_chain = hasher.finalize().to_vec();
+            
+            // Update session state
+            session.ratchet_state.root_key = new_root_key;
+            session.ratchet_state.send_chain_key = new_send_chain;
+            session.ratchet_state.recv_chain_key = Some(new_recv_chain);
+            session.ratchet_state.dh_s = new_dh_secret.to_bytes().to_vec();
+            session.ratchet_state.ratchet_flag = false; // Reset ratchet flag
+        }
         
         debug!("DH ratchet step completed successfully");
         Ok(())
@@ -851,10 +870,10 @@ impl KeyManager {
         };
         
         // Convert private key to public key
-        let dh_secret = match X25519SecretKey::from_bytes(&session.ratchet_state.dh_s) {
-            Some(key) => key,
-            None => {
-                error!("Invalid ratchet secret key");
+        let dh_secret = match <[u8; 32]>::try_from(&session.ratchet_state.dh_s[..]) {
+            Ok(array) => X25519SecretKey::from(array),
+            Err(_) => {
+                error!("Invalid ratchet secret key length");
                 return Err(KeyManagerError::InvalidKey);
             }
         };

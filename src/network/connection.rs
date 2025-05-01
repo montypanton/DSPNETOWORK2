@@ -182,7 +182,7 @@ impl ServerConnection {
         let request = AnnouncementRequest {
             ed25519_public_key: identity.ed25519.public.clone(),
             x25519_public_key: identity.x25519.public.clone(),
-            kyber_public_key: identity.kyber.public.0.clone(),
+            kyber_public_key: identity.kyber.public.data.clone(),
         };
         
         // Send request to server
