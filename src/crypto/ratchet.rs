@@ -138,6 +138,7 @@ impl RatchetState {
         }
         
         // Compute Diffie-Hellman shared secret
+        let remote_public = X25519PublicKey::from(remote_public_bytes);
         let dh_output = dh_secret.diffie_hellman(&remote_public);
         
         // Generate new DH key pair
@@ -294,6 +295,7 @@ impl RatchetState {
         };
         
         // Compute Diffie-Hellman shared secret
+        let dh_secret = X25519SecretKey::from(dh_secret_bytes);
         let dh_output = dh_secret.diffie_hellman(&remote_public);
         
         // Calculate new root key and chain key

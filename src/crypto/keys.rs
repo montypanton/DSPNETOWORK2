@@ -415,10 +415,11 @@ impl KeyManager {
         
         // Generate X25519 shared secret
         let mut public_bytes = [0u8; 32];
+        let x25519_shared;
         if peer.x25519.public.len() >= 32 {
             public_bytes.copy_from_slice(&peer.x25519.public[0..32]);
             let peer_public = X25519PublicKey::from(public_bytes);
-            // continue with the code
+            x25519_shared = my_secret.diffie_hellman(&peer_public);
         } else {
             error!("Invalid peer X25519 public key length");
             return Err(KeyManagerError::InvalidKey);
@@ -430,7 +431,6 @@ impl KeyManager {
         }
         let my_secret = X25519SecretKey::from(secret_bytes);
         
-        let x25519_shared = my_secret.diffie_hellman(&peer_public);
         
         // Generate Kyber shared secret
         let mut rng = rand::thread_rng();
