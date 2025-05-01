@@ -448,31 +448,21 @@ pub async fn list_topics(
 ) -> Result<Vec<Topic>, ServerError> {
     debug!("Listing topics, public_only={}", only_public);
 
-    // Query without using query_as to avoid issues with timestamp types
-    let rows = if only_public {
-        sqlx::query!(
-            "SELECT id, EXTRACT(EPOCH FROM created_at)::bigint as created_at
-             FROM topics
-             WHERE topic_type = 'Public' OR topic_type IS NULL
-             ORDER BY created_at DESC
-             LIMIT $1 OFFSET $2",
-            limit as i64,
-            offset as i64
-        )
-        .fetch_all(pool)
-        .await?
-    } else {
-        sqlx::query!(
-            "SELECT id, EXTRACT(EPOCH FROM created_at)::bigint as created_at
-             FROM topics
-             ORDER BY created_at DESC
-             LIMIT $1 OFFSET $2",
-            limit as i64,
-            offset as i64
-        )
-        .fetch_all(pool)
-        .await?
-    };
+    // Combined query with conditional filter
+    let rows = sqlx::query!(
+        r#"
+        SELECT id, EXTRACT(EPOCH FROM created_at)::bigint as created_at
+        FROM topics
+        WHERE ($1 = false OR topic_type = 'Public' OR topic_type IS NULL)
+        ORDER BY created_at DESC
+        LIMIT $2 OFFSET $3
+        "#,
+        only_public,
+        limit as i64,
+        offset as i64
+    )
+    .fetch_all(pool)
+    .await?;
 
     // Convert to model objects
     let topics = rows
@@ -760,43 +750,27 @@ pub async fn get_topic_messages(
     limit: usize,
     since: Option<u64>,
 ) -> Result<Vec<TopicMessage>, ServerError> {
-    debug!(
-        "Getting messages for topic: {}, limit: {}",
-        hex::encode(topic_id),
-        limit
-    );
+    debug!("Getting messages for topic: {}, limit: {}", hex::encode(topic_id), limit);
 
-    // Use direct query with explicit type conversion
-    let rows = if let Some(timestamp) = since {
-        sqlx::query!(
-            "SELECT id, encrypted_content, 
-             EXTRACT(EPOCH FROM posted_at)::bigint as posted_at,
-             EXTRACT(EPOCH FROM expiry)::bigint as expiry
-             FROM topic_messages
-             WHERE topic_id = $1 AND posted_at > to_timestamp($2)
-             ORDER BY posted_at DESC
-             LIMIT $3",
-            topic_id,
-            timestamp as f64,
-            limit as i64
-        )
-        .fetch_all(pool)
-        .await?
-    } else {
-        sqlx::query!(
-            "SELECT id, encrypted_content, 
-             EXTRACT(EPOCH FROM posted_at)::bigint as posted_at,
-             EXTRACT(EPOCH FROM expiry)::bigint as expiry
-             FROM topic_messages
-             WHERE topic_id = $1
-             ORDER BY posted_at DESC
-             LIMIT $2",
-            topic_id,
-            limit as i64
-        )
-        .fetch_all(pool)
-        .await?
-    };
+    // Use a combined query with conditional filter
+    let since_timestamp = since.unwrap_or(0) as f64;
+    let rows = sqlx::query!(
+        r#"
+        SELECT id, encrypted_content, 
+        EXTRACT(EPOCH FROM posted_at)::bigint as posted_at,
+        EXTRACT(EPOCH FROM expiry)::bigint as expiry
+        FROM topic_messages
+        WHERE topic_id = $1 
+        AND ($2 = 0 OR posted_at > to_timestamp($2))
+        ORDER BY posted_at DESC
+        LIMIT $3
+        "#,
+        topic_id,
+        since_timestamp,
+        limit as i64
+    )
+    .fetch_all(pool)
+    .await?;
 
     let mut messages = Vec::with_capacity(rows.len());
     for row in rows {
@@ -1056,24 +1030,18 @@ pub async fn delete_topic_messages_before(
     // Use a transaction to ensure consistency
     let mut tx = pool.begin().await?;
     
-    // Identify messages to delete using consistent query approach
-    let message_ids = if timestamp > 0 {
-        sqlx::query!(
-            "SELECT id FROM topic_messages 
-             WHERE topic_id = $1 AND posted_at < to_timestamp($2)",
-            topic_id,
-            timestamp as f64
-        )
-        .fetch_all(&mut tx)
-        .await?
-    } else {
-        sqlx::query!(
-            "SELECT id FROM topic_messages WHERE topic_id = $1",
-            topic_id
-        )
-        .fetch_all(&mut tx)
-        .await?
-    };
+    // Combined query with conditional filter
+    let message_ids = sqlx::query!(
+        r#"
+        SELECT id FROM topic_messages 
+        WHERE topic_id = $1
+        AND ($2 = 0 OR posted_at < to_timestamp($2))
+        "#,
+        topic_id,
+        timestamp as f64
+    )
+    .fetch_all(&mut tx)
+    .await?;
 
     if message_ids.is_empty() {
         return Ok(0);
