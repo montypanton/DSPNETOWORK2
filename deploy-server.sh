@@ -30,49 +30,12 @@ if [ $attempt -eq 30 ]; then
     exit 1
 fi
 
-# Step 4: Generate SQLx metadata (if not using offline mode)
-echo "Step 4: Do you want to generate SQLx metadata from the database? (y/N)"
-read -r response
-if [[ "$response" =~ ^([yY][eE][sS]|[yY])$ ]]; then
-    # Temporarily create a directory for SQLx metadata
-    mkdir -p server/.sqlx
-    
-    # Get the current working directory
-    CWD=$(pwd)
-    
-    # Go to the server directory
-    cd server
-    
-    # Export the database URL
-    export DATABASE_URL="postgres://secnetuser:secnetpassword@localhost:5432/secnet"
-    
-    # Install sqlx-cli if not already installed
-    if ! command -v sqlx &> /dev/null; then
-        echo "Installing sqlx-cli..."
-        cargo install sqlx-cli --no-default-features --features postgres
-    fi
-    
-    # Run the prepare command
-    echo "Generating SQLx metadata..."
-    cargo sqlx prepare --merged
-    
-    # Return to the original directory
-    cd "$CWD"
-    
-    # Turn off offline mode for the initial run
-    docker-compose stop server
-    docker-compose rm -f server
-    docker-compose build --build-arg SQLX_OFFLINE=false server
-else
-    echo "Skipping SQLx metadata generation, using offline mode"
-fi
-
-# Step 5: Start the full stack
-echo "Step 5: Starting the full server stack..."
+# Step 4: Start the full stack
+echo "Step 4: Starting the full server stack..."
 docker-compose up -d
 
-# Step 6: Verify server started correctly
-echo "Step 6: Verifying server status..."
+# Step 5: Verify server started correctly
+echo "Step 5: Verifying server status..."
 attempt=0
 while [ $attempt -lt 12 ]; do
     if curl -s http://localhost:8080/api/connection/ping | grep -q "Pong"; then
