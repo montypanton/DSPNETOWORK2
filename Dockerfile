@@ -14,7 +14,8 @@ RUN apt-get update && apt-get install -y \
     libc6-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Force SQLx to use a mode
+# Set environment for building
+ENV DATABASE_URL=postgres://secnetuser:secnetpassword@db:5432/secnet
 ENV SQLX_OFFLINE=false
 
 # Build the server binary with debug info for better error messages
@@ -63,7 +64,7 @@ USER secnet
 ENV RUST_LOG=debug
 ENV SERVER_PORT=8080
 ENV DATABASE_URL=postgres://secnetuser:secnetpassword@db:5432/secnet
-ENV SQLX_OFFLINE=true
+ENV SQLX_OFFLINE=false
 
 # Expose the port the server listens on
 EXPOSE 8080

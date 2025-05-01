@@ -659,7 +659,7 @@ pub async fn get_subscriber(
             topic_id: hex::encode(topic_id),
             subscriber_token: subscriber_token.to_vec(),
             routing_data: row.routing_data,
-            capabilities: row.capabilities.unwrap_or(1) as u8,
+            capabilities: row.capabilities as u8,
             join_time: row.join_time.unwrap_or(0) as u64,
             last_active: row.last_active.unwrap_or(0) as u64,
         }))
