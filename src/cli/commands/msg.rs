@@ -1,6 +1,6 @@
 // client/src/cli/commands/msg.rs
 use clap::ArgMatches;
-use log::{debug, error, info, trace, warn};
+use log::{debug, error, info, warn};
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::sync::Arc;
@@ -73,7 +73,7 @@ async fn send_message(
     matches: &ArgMatches,
     key_manager: &mut KeyManager,
     server_connection: &ServerConnection,
-    config: &Config,
+    _config: &Config,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let fingerprint = matches.value_of("FINGERPRINT").unwrap();
     let message_content = matches.value_of("MESSAGE").unwrap();
@@ -447,7 +447,7 @@ async fn interactive_chat(
             let stdin_clone = Arc::clone(&stdin);
             let input_result = tokio::task::spawn_blocking(move || {
                 let mut temp_input = String::new();
-                let mut stdin_guard = stdin_clone.blocking_lock();
+                let stdin_guard = stdin_clone.blocking_lock();
                 match stdin_guard.read_line(&mut temp_input) {
                     Ok(_) => Some(temp_input),
                     Err(_) => None,

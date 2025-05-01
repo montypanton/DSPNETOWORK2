@@ -2,7 +2,7 @@
 use log::{debug, error, info, trace, warn};
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use std::collections::HashMap;
 use tokio::time;
 use sha2::{Digest, Sha256};

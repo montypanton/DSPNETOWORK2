@@ -1,7 +1,7 @@
 // src/crypto/keys.rs - Updated with proper Kyber implementation
-use ed25519_dalek::{Keypair as Ed25519Keypair, PublicKey as Ed25519PublicKey, SecretKey as Ed25519SecretKey};
+use ed25519_dalek::Keypair as Ed25519Keypair;
 use rand_07::rngs::OsRng as OsRng07; // Using rand 0.7 explicitly for ed25519-dalek compatibility
-use rand::{Rng, RngCore}; // Using rand 0.8 for general RNG
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -276,7 +276,7 @@ impl KeyManager {
             rand::thread_rng().fill(&mut key_id);
             
             // Generate X25519 keypair for this prekey
-            let mut csprng = OsRng07{};
+            let csprng = OsRng07{};
             let x25519_secret = X25519SecretKey::new(csprng);
             let x25519_public = X25519PublicKey::from(&x25519_secret);
             
@@ -457,9 +457,9 @@ impl KeyManager {
         let chain_key = hasher.finalize().to_vec();
         
         // Generate sending ratchet key
-        let mut csprng = OsRng07{};
+        let csprng = OsRng07{};
         let ratchet_secret = X25519SecretKey::new(csprng);
-        let ratchet_public = X25519PublicKey::from(&ratchet_secret);
+        let _ratchet_public = X25519PublicKey::from(&ratchet_secret);
         
         // Initialize ratchet state for Double Ratchet Algorithm
         let ratchet_state = RatchetState {
@@ -716,7 +716,7 @@ impl KeyManager {
             .map_err(|e| KeyManagerError::DecryptionError(format!("Failed to deserialize header: {}", e)))?;
         
         // Check if we need to perform a DH ratchet step
-        let (dh_ratchet_needed, current_remote_key) = {
+        let (dh_ratchet_needed, _current_remote_key) = {
             let session = self.get_session(peer_fingerprint).unwrap();
             match &session.ratchet_state.dh_r {
                 Some(current_remote_key) => {

@@ -6,16 +6,8 @@ pub mod kyber;
 pub mod ratchet;
 
 // Re-export commonly used types
-pub use keys::{
-    KeyManager, KeyManagerError,
-    IdentityKeyBundle, Session, RatchetState,
-    IdentityEd25519, IdentityX25519, PreKeyBundle
-};
-
-pub use kyber::{
-    KyberKeypair, KyberPublicKey, KyberSecretKey, KyberCiphertext,
-    encapsulate, decapsulate
-};
+pub use keys::KeyManager;
+pub use kyber::KyberPublicKey;
 
 // Utility function to verify a fingerprint
 pub fn verify_fingerprint(fingerprint: &str, ed25519_key: &[u8], x25519_key: &[u8], kyber_key: &[u8]) -> bool {

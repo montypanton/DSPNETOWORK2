@@ -74,7 +74,7 @@ pub async fn execute(matches: &ArgMatches, config: &Config) -> Result<(), Box<dy
         info!("Identity keys already exist, not generating new ones");
         
         // If alias is provided, update it
-        if let Some(alias_str) = alias {
+        if let Some(_alias_str) = alias {
             // In a real implementation, we would have a method to update the alias
             // For this simulation, we'll just note that it would be updated
             println!("Note: Alias updates not implemented in this version");

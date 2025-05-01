@@ -141,7 +141,7 @@ impl RatchetState {
         let dh_output = dh_secret.diffie_hellman(&remote_public);
         
         // Generate new DH key pair
-        let csprng = OsRng07{};
+        let csprng = rand_07::rngs::OsRng{};
         let new_dh_secret = X25519SecretKey::new(csprng);
         let new_dh_public = X25519PublicKey::from(&new_dh_secret);
         

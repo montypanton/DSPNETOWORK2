@@ -3,7 +3,6 @@ use clap::ArgMatches;
 use log::{debug, error, info, warn};
 use std::fs::{self, File};
 use std::io::{Read, Write};
-use std::path::Path;
 use prettytable::{Table, Row, Cell};
 use serde::{Deserialize, Serialize};
 

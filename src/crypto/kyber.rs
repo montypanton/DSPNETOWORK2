@@ -150,7 +150,7 @@ fn compress(poly: &[i16], d: usize) -> Vec<u8> {
                     result[5*i + j/4*5 + j%4] = (compressed & 0xff) as u8;
                     if compressed > 255 {
                         // Fix overflow by using the proper bit masking and shifting
-                        result[5*i + j/4*5 + 4] |= ((compressed >> 8) & 0x03) as u8 << (2*j);
+                        result[5*i + j/4*5 + 4] |= (((compressed >> 8) & 0x03) as u8) << (2*j);
                     }
                 } else {
                     result[5*i + (j-4)/4*5 + (j-4)%4] |= ((compressed & 0x3) as u8) << 6;
@@ -158,7 +158,7 @@ fn compress(poly: &[i16], d: usize) -> Vec<u8> {
                     if compressed > 1023 {
                         // Fix overflow by ensuring we only shift by safe amounts
                         // Only shift by maximum 9 bits (10-bit value - 1)
-                        result[5*i + (j-4)/4*5 + 4] |= ((compressed >> 10) & 0x01) as u8 << (2*(j-4) + 1);
+                        result[5*i + (j-4)/4*5 + 4] |= (((compressed >> 10) & 0x01) as u8) << (2*(j-4) + 1);
                     }
                 }
             } else if d == 4 { // dv

@@ -4,7 +4,7 @@ use log::{debug, error, info, warn};
 use std::fs;
 use std::path::Path;
 use chrono::{DateTime, Local};
-use prettytable::{Table, Row, Cell};
+use prettytable::prettytable;
 
 use crate::crypto::keys::KeyManager;
 use crate::network::connection::ServerConnection;

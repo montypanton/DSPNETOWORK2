@@ -48,7 +48,7 @@ pub async fn execute(matches: &ArgMatches, config: &Config) -> Result<(), Box<dy
     };
     
     // Initialize server connection
-    let mut server_connection = ServerConnection::new(updated_config.clone(), Some(identity.clone()))?;
+    let server_connection = ServerConnection::new(updated_config.clone(), Some(identity.clone()))?;
     
     // Check existing connection token
     if refresh_token || updated_config.connection_token.is_none() {
