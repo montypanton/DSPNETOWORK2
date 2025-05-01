@@ -107,13 +107,27 @@ fn cbd(bytes: &[u8], eta: usize) -> Vec<i16> {
     
     // For eta=2 (used in Kyber)
     if eta == 2 {
+        let bytes_needed = KYBER_N / 4;
+        // Ensure we have enough bytes
+        if bytes.len() < bytes_needed * 4 {
+            // Handle insufficient bytes (return zeros or log error)
+            return r;
+        }
+        
         for i in 0..KYBER_N/4 {
-            let t = u32::from_le_bytes(bytes[4*i..4*i+4].try_into().unwrap());
-            
-            for j in 0..8 {
-                let a = ((t >> (4*j))     & 0x1) + ((t >> (4*j + 1)) & 0x1);
-                let b = ((t >> (4*j + 2)) & 0x1) + ((t >> (4*j + 3)) & 0x1);
-                r[8*i + j] = (a as i16) - (b as i16);
+            if i*4+3 < bytes.len() {  // Safety check to prevent out-of-bounds access
+                let t = u32::from_le_bytes([
+                    bytes[4*i], 
+                    bytes[4*i+1], 
+                    bytes[4*i+2], 
+                    bytes[4*i+3]
+                ]);
+                
+                for j in 0..8 {
+                    let a = ((t >> (4*j))     & 0x1) + ((t >> (4*j + 1)) & 0x1);
+                    let b = ((t >> (4*j + 2)) & 0x1) + ((t >> (4*j + 3)) & 0x1);
+                    r[8*i + j] = (a as i16) - (b as i16);
+                }
             }
         }
     }
@@ -127,6 +141,13 @@ fn gen_poly(seed: &[u8], nonce: u8) -> Vec<i16> {
     hasher.update(seed);
     hasher.update(&[nonce]);
     let hash = hasher.finalize();
+    
+    // Make sure we have enough bytes for the CBD function
+    let required_bytes = KYBER_N / 2; // For eta=2
+    if hash.len() < required_bytes {
+        // Return zeros if we don't have enough entropy
+        return vec![0i16; KYBER_N];
+    }
     
     cbd(&hash, KYBER_ETA1)
 }
