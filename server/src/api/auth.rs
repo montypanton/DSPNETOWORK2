@@ -1,6 +1,6 @@
 // server/src/api/auth.rs
 use actix_web::{get, post, web, HttpResponse, Responder, HttpRequest};
-use log::{info, debug, warn};
+use log::info;  
 use sqlx::PgPool;
 use uuid::Uuid;
 

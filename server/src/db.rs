@@ -4,9 +4,6 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
-use chrono::NaiveDateTime;
-use sqlx::types::BigDecimal;
-use std::str::FromStr;
 
 use crate::error::ServerError;
 use crate::models::{
@@ -465,17 +462,17 @@ pub async fn list_topics(
     .await?;
 
     // Convert to model objects
-    let topics = rows
-        .into_iter()
-        .map(|row| {
-            let created_timestamp = row.created_at.unwrap_or(0) as u64;
+    let topics: Vec<Topic> = rows  
+    .into_iter()
+    .map(|row| {
+        let created_timestamp = row.created_at.unwrap_or(0) as u64;
 
-            Topic {
-                hash: hex::encode(&row.id),
-                created_at: created_timestamp,
-            }
-        })
-        .collect();
+        Topic {
+            hash: hex::encode(&row.id),
+            created_at: created_timestamp,
+        }
+    })
+    .collect();
 
     debug!("Found {} topics", topics.len());
     Ok(topics)
@@ -766,7 +763,7 @@ pub async fn get_topic_messages(
         LIMIT $3
         "#,
         topic_id,
-        since_timestamp,
+        since_timestamp as i32,
         limit as i64
     )
     .fetch_all(pool)
