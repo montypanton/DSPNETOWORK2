@@ -413,7 +413,17 @@ impl KeyManager {
             }
         };
         
-        // Generate X25519 shared secret
+        // Get our X25519 secret key
+        let mut secret_bytes = [0u8; 32];
+        if identity.x25519.secret.len() >= 32 {
+            secret_bytes.copy_from_slice(&identity.x25519.secret[0..32]);
+        } else {
+            error!("Invalid X25519 secret key length");
+            return Err(KeyManagerError::InvalidKey);
+        }
+        let my_secret = X25519SecretKey::from(secret_bytes);
+        
+        // Get peer's X25519 public key
         let mut public_bytes = [0u8; 32];
         let x25519_shared;
         if peer.x25519.public.len() >= 32 {
@@ -424,13 +434,6 @@ impl KeyManager {
             error!("Invalid peer X25519 public key length");
             return Err(KeyManagerError::InvalidKey);
         }
-        
-        let mut secret_bytes = [0u8; 32];
-        if identity.x25519.secret.len() >= 32 {
-            secret_bytes.copy_from_slice(&identity.x25519.secret[0..32]);
-        }
-        let my_secret = X25519SecretKey::from(secret_bytes);
-        
         
         // Generate Kyber shared secret
         let mut rng = rand::thread_rng();

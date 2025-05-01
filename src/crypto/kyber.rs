@@ -138,24 +138,31 @@ fn compress(poly: &[i16], d: usize) -> Vec<u8> {
     for i in 0..KYBER_N/8 {
         for j in 0..8 {
             let coeff = poly[8*i + j];
-            let compressed = ((((coeff << d) + KYBER_Q/2) / KYBER_Q) & ((1 << d) - 1)) as u8;
+            // The issue is with the shift operations. We need to ensure proper type casting and range checking
+            
+            // Calculate compressed value safely (avoid overflows)
+            let compressed = ((((coeff as i32) << d) + (KYBER_Q/2) as i32) / KYBER_Q as i32) & ((1 << d) - 1);
+            let compressed = compressed as u16; // Cast to u16 to handle 10-bit values safely
             
             // Pack d bits into bytes
             if d == 10 { // du
                 if j < 4 {
-                    result[5*i + j/4*5 + j%4] = compressed & 0xff;
+                    result[5*i + j/4*5 + j%4] = (compressed & 0xff) as u8;
                     if compressed > 255 {
-                        result[5*i + j/4*5 + 4] |= ((compressed >> 8) & 0xFF) << (2*j);
+                        // Fix overflow by using the proper bit masking and shifting
+                        result[5*i + j/4*5 + 4] |= ((compressed >> 8) & 0x03) as u8 << (2*j);
                     }
                 } else {
-                    result[5*i + (j-4)/4*5 + (j-4)%4] |= (compressed & 0x3) << 6;
-                    result[5*i + (j-4)/4*5 + (j-4)%4 + 1] = (compressed >> 2) & 0xff;
+                    result[5*i + (j-4)/4*5 + (j-4)%4] |= ((compressed & 0x3) as u8) << 6;
+                    result[5*i + (j-4)/4*5 + (j-4)%4 + 1] = ((compressed >> 2) & 0xff) as u8;
                     if compressed > 1023 {
-                        result[5*i + (j-4)/4*5 + 4] |= ((compressed >> 10) & 0xFF) << (2*(j-4) + 1);
+                        // Fix overflow by ensuring we only shift by safe amounts
+                        // Only shift by maximum 9 bits (10-bit value - 1)
+                        result[5*i + (j-4)/4*5 + 4] |= ((compressed >> 10) & 0x01) as u8 << (2*(j-4) + 1);
                     }
                 }
             } else if d == 4 { // dv
-                result[i*4 + j/2] |= (compressed << (4*(j%2))) & 0xff;
+                result[i*4 + j/2] |= ((compressed << (4*(j%2))) & 0xff) as u8;
             }
         }
     }

@@ -119,30 +119,29 @@ impl RatchetState {
         };
         
         // Convert keys to X25519 format
-        let dh_secret = match X25519SecretKey::from_bytes(&self.dh_key_pair.private) {
-            Some(key) => key,
-            None => {
-                error!("Invalid DH secret key");
-                return Err(RatchetError::InvalidKey);
-            }
-        };
+        let mut secret_bytes = [0u8; 32];
+        if self.dh_key_pair.private.len() >= 32 {
+            secret_bytes.copy_from_slice(&self.dh_key_pair.private[0..32]);
+        } else {
+            error!("Invalid DH secret key");
+            return Err(RatchetError::InvalidKey);
+        }
+        let dh_secret = X25519SecretKey::from(secret_bytes);
         
-        let mut public_bytes = [0u8; 32];
+        let mut remote_public_bytes = [0u8; 32];
         if remote_key.len() >= 32 {
-            public_bytes.copy_from_slice(&remote_key[0..32]);
-            let remote_public = X25519PublicKey::from(public_bytes);
-            // Continue with the code
+            remote_public_bytes.copy_from_slice(&remote_key[0..32]);
         } else {
             error!("Invalid remote public key");
             return Err(RatchetError::InvalidKey);
         }
+        let remote_public = X25519PublicKey::from(remote_public_bytes);
         
         // Compute Diffie-Hellman shared secret
-        let remote_public = X25519PublicKey::from(remote_public_bytes);
         let dh_output = dh_secret.diffie_hellman(&remote_public);
         
         // Generate new DH key pair
-        let csprng = rand_07::rngs::OsRng{};
+        let csprng = OsRng07{};
         let new_dh_secret = X25519SecretKey::new(csprng);
         let new_dh_public = X25519PublicKey::from(&new_dh_secret);
         
@@ -279,23 +278,22 @@ impl RatchetState {
         let mut secret_bytes = [0u8; 32];
         if self.dh_key_pair.private.len() >= 32 {
             secret_bytes.copy_from_slice(&self.dh_key_pair.private[0..32]);
-            let dh_secret = X25519SecretKey::from(secret_bytes);
-            // Continue with the code
         } else {
             error!("Invalid DH secret key");
             return Err(RatchetError::InvalidKey);
         }
+        let dh_secret = X25519SecretKey::from(secret_bytes);
         
-        let remote_public = match X25519PublicKey::from_bytes(remote_key) {
-            Some(key) => key,
-            None => {
-                error!("Invalid remote public key");
-                return Err(RatchetError::InvalidKey);
-            }
-        };
+        let mut remote_public_bytes = [0u8; 32];
+        if remote_key.len() >= 32 {
+            remote_public_bytes.copy_from_slice(&remote_key[0..32]);
+        } else {
+            error!("Invalid remote public key");
+            return Err(RatchetError::InvalidKey);
+        }
+        let remote_public = X25519PublicKey::from(remote_public_bytes);
         
         // Compute Diffie-Hellman shared secret
-        let dh_secret = X25519SecretKey::from(dh_secret_bytes);
         let dh_output = dh_secret.diffie_hellman(&remote_public);
         
         // Calculate new root key and chain key
