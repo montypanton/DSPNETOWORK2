@@ -1,7 +1,8 @@
-// server/src/db.rs
+// server/src/db_fix.rs
+// Modified version to work around SQLx offline mode issues
 use log::{debug, info, trace};
 use sha2::{Digest, Sha256};
-use sqlx::PgPool;
+use sqlx::{PgPool, Row, postgres::PgRow};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
@@ -35,19 +36,18 @@ pub async fn store_message(
         .as_secs();
 
     // Insert the message with added integrity protection
-    sqlx::query!(
+    sqlx::query(
         "INSERT INTO pending_messages 
          (id, recipient_key_hash, encrypted_content, hmac, created_at, expiry, is_delivered, priority, delivery_attempts) 
-         VALUES ($1, $2, $3, $4, NOW(), to_timestamp($5), FALSE, $6, 0)",
-        message_id,
-        recipient_key_hash,
-        encrypted_content,
-        hmac,
-        expiry_timestamp as f64,
-        priority as i16
-    )
-    .execute(pool)
-    .await?;
+         VALUES ($1, $2, $3, $4, NOW(), to_timestamp($5), FALSE, $6, 0)")
+        .bind(message_id)
+        .bind(recipient_key_hash)
+        .bind(encrypted_content)
+        .bind(hmac)
+        .bind(expiry_timestamp as f64)
+        .bind(priority as i16)
+        .execute(pool)
+        .await?;
 
     info!("Message stored successfully");
     Ok(())
@@ -90,20 +90,19 @@ pub async fn store_public_keys(
     };
 
     // Try to insert, if exists update the token
-    sqlx::query!(
+    sqlx::query(
         "INSERT INTO public_keys 
          (public_key_hash, ed25519_public_key, x25519_public_key, kyber_public_key, connection_token, last_active) 
          VALUES ($1, $2, $3, $4, $5, NOW())
          ON CONFLICT (public_key_hash) 
-         DO UPDATE SET connection_token = $5, last_active = NOW(), connection_count = COALESCE(public_keys.connection_count, 0) + 1",
-        public_key_hash,
-        ed25519_public_key,
-        x25519_public_key,
-        kyber_public_key,
-        token_uuid
-    )
-    .execute(pool)
-    .await?;
+         DO UPDATE SET connection_token = $5, last_active = NOW(), connection_count = COALESCE(public_keys.connection_count, 0) + 1")
+        .bind(public_key_hash)
+        .bind(ed25519_public_key)
+        .bind(x25519_public_key)
+        .bind(kyber_public_key)
+        .bind(token_uuid)
+        .execute(pool)
+        .await?;
 
     info!("Public keys stored successfully");
     Ok(())
@@ -122,20 +121,19 @@ pub async fn verify_connection_token(pool: &PgPool, token: &str) -> Result<Vec<u
     };
 
     // Look up the token and update last_active
-    let result = sqlx::query!(
+    let row = sqlx::query(
         "UPDATE public_keys
          SET last_active = NOW()
          WHERE connection_token = $1
-         RETURNING public_key_hash",
-        token_uuid
-    )
-    .fetch_optional(pool)
-    .await?;
+         RETURNING public_key_hash")
+        .bind(token_uuid)
+        .fetch_optional(pool)
+        .await?;
 
-    match result {
+    match row {
         Some(record) => {
             trace!("Token verified successfully");
-            Ok(record.public_key_hash.to_vec())
+            Ok(record.get::<Vec<u8>, _>("public_key_hash"))
         }
         None => {
             debug!("Invalid token, no matching record: {}", token);
@@ -160,31 +158,29 @@ pub async fn store_prekeys(
 
     for prekey in prekeys {
         // Check if this prekey ID already exists for this public key
-        let existing = sqlx::query!(
-            "SELECT id FROM prekeys WHERE public_key_hash = $1 AND key_id = $2",
-            public_key_hash,
-            prekey.key_id
-        )
-        .fetch_optional(pool)
-        .await?;
+        let row = sqlx::query(
+            "SELECT id FROM prekeys WHERE public_key_hash = $1 AND key_id = $2")
+            .bind(public_key_hash)
+            .bind(&prekey.key_id)
+            .fetch_optional(pool)
+            .await?;
 
-        if existing.is_some() {
+        if row.is_some() {
             debug!("Prekey already exists, skipping");
             continue;
         }
 
         // Insert the prekey
-        sqlx::query!(
+        sqlx::query(
             "INSERT INTO prekeys 
              (public_key_hash, key_id, x25519_public_key, kyber_public_key, is_used)
-             VALUES ($1, $2, $3, $4, FALSE)",
-            public_key_hash,
-            &prekey.key_id,
-            &prekey.x25519,
-            &prekey.kyber.0 // Access the inner Vec<u8>
-        )
-        .execute(pool)
-        .await?;
+             VALUES ($1, $2, $3, $4, FALSE)")
+            .bind(public_key_hash)
+            .bind(&prekey.key_id)
+            .bind(&prekey.x25519)
+            .bind(&prekey.kyber.0) // Access the inner Vec<u8>
+            .execute(pool)
+            .await?;
 
         count += 1;
     }
@@ -205,16 +201,15 @@ pub async fn get_prekeys(
         hex::encode(public_key_hash)
     );
 
-    let rows = sqlx::query!(
+    let rows = sqlx::query(
         "SELECT key_id, x25519_public_key, kyber_public_key 
          FROM prekeys 
          WHERE public_key_hash = $1 AND is_used = FALSE
-         LIMIT $2",
-        public_key_hash,
-        limit as i64
-    )
-    .fetch_all(pool)
-    .await?;
+         LIMIT $2")
+        .bind(public_key_hash)
+        .bind(limit as i64)
+        .fetch_all(pool)
+        .await?;
 
     if rows.is_empty() {
         debug!("No prekeys available");
@@ -222,23 +217,22 @@ pub async fn get_prekeys(
     }
 
     // Mark these prekeys as used
-    let prekey_ids: Vec<Vec<u8>> = rows.iter().map(|row| row.key_id.clone()).collect();
+    let prekey_ids: Vec<Vec<u8>> = rows.iter().map(|row| row.get("key_id")).collect();
 
-    sqlx::query!(
-        "UPDATE prekeys SET is_used = TRUE WHERE public_key_hash = $1 AND key_id = ANY($2)",
-        public_key_hash,
-        &prekey_ids
-    )
-    .execute(pool)
-    .await?;
+    sqlx::query(
+        "UPDATE prekeys SET is_used = TRUE WHERE public_key_hash = $1 AND key_id = ANY($2)")
+        .bind(public_key_hash)
+        .bind(&prekey_ids)
+        .execute(pool)
+        .await?;
 
     // Convert to PreKeyBundle objects
     let prekeys: Vec<PreKeyBundle> = rows
         .into_iter()
         .map(|row| PreKeyBundle {
-            key_id: row.key_id,
-            x25519: row.x25519_public_key,
-            kyber: KyberPublicKey(row.kyber_public_key),
+            key_id: row.get("key_id"),
+            x25519: row.get("x25519_public_key"),
+            kyber: KyberPublicKey(row.get("kyber_public_key")),
         })
         .collect();
 
@@ -260,18 +254,17 @@ pub async fn get_pending_messages(
         hex::encode(recipient_key_hash)
     );
 
-    let rows = sqlx::query!(
+    let rows = sqlx::query(
         "SELECT id, encrypted_content, 
          EXTRACT(EPOCH FROM expiry)::bigint as expiry_ts
          FROM pending_messages
          WHERE recipient_key_hash = $1 AND is_delivered = FALSE
          ORDER BY priority DESC, created_at ASC
-         LIMIT $2",
-        recipient_key_hash,
-        effective_limit
-    )
-    .fetch_all(pool)
-    .await?;
+         LIMIT $2")
+        .bind(recipient_key_hash)
+        .bind(effective_limit)
+        .fetch_all(pool)
+        .await?;
 
     if rows.is_empty() {
         debug!("No pending messages found");
@@ -281,12 +274,12 @@ pub async fn get_pending_messages(
     // Convert to Message objects
     let mut messages = Vec::with_capacity(rows.len());
     for row in rows {
-        let expiry_timestamp = row.expiry_ts.unwrap_or(0) as u64;
+        let expiry_timestamp = row.get::<Option<i64>, _>("expiry_ts").unwrap_or(0) as u64;
 
         messages.push(Message {
-            id: hex::encode(&row.id),
+            id: hex::encode(row.get::<Vec<u8>, _>("id")),
             recipient_key_hash: hex::encode(recipient_key_hash),
-            encrypted_content: row.encrypted_content,
+            encrypted_content: row.get("encrypted_content"),
             expiry: expiry_timestamp,
         });
     }
@@ -307,17 +300,17 @@ pub async fn verify_message_recipient(
         hex::encode(message_id)
     );
 
-    let result = sqlx::query!(
+    let row = sqlx::query(
         "SELECT COUNT(*) as count
          FROM pending_messages
-         WHERE id = $1 AND recipient_key_hash = $2",
-        message_id,
-        recipient_key_hash
-    )
-    .fetch_one(pool)
-    .await?;
+         WHERE id = $1 AND recipient_key_hash = $2")
+        .bind(message_id)
+        .bind(recipient_key_hash)
+        .fetch_one(pool)
+        .await?;
 
-    let exists = result.count.unwrap_or(0) > 0;
+    let count: i64 = row.get("count");
+    let exists = count > 0;
     debug!("Message recipient verification result: {}", exists);
     Ok(exists)
 }
@@ -329,17 +322,16 @@ pub async fn mark_message_delivered(
 ) -> Result<bool, ServerError> {
     debug!("Marking message as delivered: {}", hex::encode(message_id));
 
-    let result = sqlx::query!(
+    let row = sqlx::query(
         "UPDATE pending_messages
          SET is_delivered = TRUE
          WHERE id = $1 AND is_delivered = FALSE
-         RETURNING id",
-        message_id
-    )
-    .fetch_optional(pool)
-    .await?;
+         RETURNING id")
+        .bind(message_id)
+        .fetch_optional(pool)
+        .await?;
 
-    let success = result.is_some();
+    let success = row.is_some();
     if success {
         debug!("Message marked as delivered");
     } else {
@@ -353,15 +345,14 @@ pub async fn mark_message_delivered(
 pub async fn delete_expired_messages(pool: &PgPool) -> Result<usize, ServerError> {
     debug!("Deleting expired messages");
 
-    let result = sqlx::query!(
+    let rows = sqlx::query(
         "DELETE FROM pending_messages
          WHERE expiry < NOW()
-         RETURNING id"
-    )
-    .fetch_all(pool)
-    .await?;
+         RETURNING id")
+        .fetch_all(pool)
+        .await?;
 
-    let count = result.len();
+    let count = rows.len();
     info!("Deleted {} expired messages", count);
     Ok(count)
 }
@@ -371,46 +362,47 @@ pub async fn get_message_stats(pool: &PgPool) -> Result<crate::message::MessageS
     debug!("Getting message statistics");
 
     // Get total pending and delivered counts
-    let counts = sqlx::query!(
+    let counts_row = sqlx::query(
         "SELECT
             SUM(CASE WHEN is_delivered = FALSE THEN 1 ELSE 0 END) as pending_count,
             SUM(CASE WHEN is_delivered = TRUE THEN 1 ELSE 0 END) as delivered_count
-         FROM pending_messages"
-    )
-    .fetch_one(pool)
-    .await?;
+         FROM pending_messages")
+        .fetch_one(pool)
+        .await?;
 
     // Get expired and delivered in last day
-    let day_stats = sqlx::query!(
+    let day_stats_row = sqlx::query(
         "SELECT
             SUM(CASE WHEN expiry < NOW() AND expiry > NOW() - INTERVAL '1 day' THEN 1 ELSE 0 END) as expired_count,
             SUM(CASE WHEN is_delivered = TRUE AND created_at > NOW() - INTERVAL '1 day' THEN 1 ELSE 0 END) as delivered_count
-         FROM pending_messages"
-    )
-    .fetch_one(pool)
-    .await?;
+         FROM pending_messages")
+        .fetch_one(pool)
+        .await?;
 
     // Get size statistics - handling NUMERIC type correctly
-    let size_stats = sqlx::query!(
+    let size_stats_row = sqlx::query(
         "SELECT
             COALESCE(AVG(LENGTH(encrypted_content))::integer, 0) as avg_size,
             COALESCE(SUM(LENGTH(encrypted_content))::bigint, 0) as total_size
-         FROM pending_messages"
-    )
-    .fetch_one(pool)
-    .await?;
+         FROM pending_messages")
+        .fetch_one(pool)
+        .await?;
 
     // Convert to expected types
-    let avg_size = size_stats.avg_size.unwrap_or(0) as usize;
-    let total_size = size_stats.total_size.unwrap_or(0) as usize;
+    let pending_count: i64 = counts_row.get::<Option<i64>, _>("pending_count").unwrap_or(0);
+    let delivered_count: i64 = counts_row.get::<Option<i64>, _>("delivered_count").unwrap_or(0);
+    let expired_count: i64 = day_stats_row.get::<Option<i64>, _>("expired_count").unwrap_or(0);
+    let day_delivered_count: i64 = day_stats_row.get::<Option<i64>, _>("delivered_count").unwrap_or(0);
+    let avg_size: i32 = size_stats_row.get::<Option<i32>, _>("avg_size").unwrap_or(0);
+    let total_size: i64 = size_stats_row.get::<Option<i64>, _>("total_size").unwrap_or(0);
 
     Ok(crate::message::MessageStats {
-        total_pending: counts.pending_count.unwrap_or(0) as usize,
-        total_delivered: counts.delivered_count.unwrap_or(0) as usize,
-        expired_last_day: day_stats.expired_count.unwrap_or(0) as usize,
-        delivered_last_day: day_stats.delivered_count.unwrap_or(0) as usize,
-        avg_message_size: avg_size,
-        total_storage_bytes: total_size,
+        total_pending: pending_count as usize,
+        total_delivered: delivered_count as usize,
+        expired_last_day: expired_count as usize,
+        delivered_last_day: day_delivered_count as usize,
+        avg_message_size: avg_size as usize,
+        total_storage_bytes: total_size as usize,
     })
 }
 
@@ -422,13 +414,12 @@ pub async fn create_topic(pool: &PgPool) -> Result<String, ServerError> {
     let topic_id = Uuid::new_v4().as_bytes().to_vec();
 
     // Insert the topic with minimal required fields
-    sqlx::query!(
+    sqlx::query(
         "INSERT INTO topics (id, created_at)
-         VALUES ($1, NOW())",
-        topic_id
-    )
-    .execute(pool)
-    .await?;
+         VALUES ($1, NOW())")
+        .bind(topic_id.clone())
+        .execute(pool)
+        .await?;
 
     // Return the topic hash as a hex string
     let topic_hash = hex::encode(&topic_id);
@@ -446,29 +437,26 @@ pub async fn list_topics(
     debug!("Listing topics, public_only={}", only_public);
 
     // Combined query with conditional filter
-    let rows = sqlx::query!(
-        r#"
-        SELECT id, EXTRACT(EPOCH FROM created_at)::bigint as created_at
+    let rows = sqlx::query(
+        "SELECT id, EXTRACT(EPOCH FROM created_at)::bigint as created_at
         FROM topics
         WHERE ($1 = false OR topic_type = 'Public' OR topic_type IS NULL)
         ORDER BY created_at DESC
-        LIMIT $2 OFFSET $3
-        "#,
-        only_public,
-        limit as i64,
-        offset as i64
-    )
-    .fetch_all(pool)
-    .await?;
+        LIMIT $2 OFFSET $3")
+        .bind(only_public)
+        .bind(limit as i64)
+        .bind(offset as i64)
+        .fetch_all(pool)
+        .await?;
 
     // Convert to model objects
     let topics: Vec<Topic> = rows  
     .into_iter()
     .map(|row| {
-        let created_timestamp = row.created_at.unwrap_or(0) as u64;
+        let created_timestamp = row.get::<Option<i64>, _>("created_at").unwrap_or(0) as u64;
 
         Topic {
-            hash: hex::encode(&row.id),
+            hash: hex::encode(row.get::<Vec<u8>, _>("id")),
             created_at: created_timestamp,
         }
     })
@@ -483,16 +471,15 @@ pub async fn get_topic(pool: &PgPool, topic_id: &[u8]) -> Result<Option<crate::t
     debug!("Fetching topic: {}", hex::encode(topic_id));
 
     // Query with explicit timestamp conversion
-    let row = sqlx::query!(
+    let row = sqlx::query(
         "SELECT EXTRACT(EPOCH FROM created_at)::bigint as created_at
-         FROM topics WHERE id = $1", 
-        topic_id
-    )
-    .fetch_optional(pool)
-    .await?;
+         FROM topics WHERE id = $1")
+        .bind(topic_id)
+        .fetch_optional(pool)
+        .await?;
 
     if let Some(row) = row {
-        let created_timestamp = row.created_at.unwrap_or(0) as u64;
+        let created_timestamp = row.get::<Option<i64>, _>("created_at").unwrap_or(0) as u64;
 
         Ok(Some(crate::topic::TopicMetadata {
             id: hex::encode(topic_id),
@@ -514,14 +501,14 @@ pub async fn get_topic(pool: &PgPool, topic_id: &[u8]) -> Result<Option<crate::t
 pub async fn topic_exists(pool: &PgPool, topic_id: &[u8]) -> Result<bool, ServerError> {
     debug!("Checking if topic exists: {}", hex::encode(topic_id));
 
-    let result = sqlx::query!(
-        "SELECT COUNT(*) as count FROM topics WHERE id = $1",
-        topic_id
-    )
-    .fetch_one(pool)
-    .await?;
+    let row = sqlx::query(
+        "SELECT COUNT(*) as count FROM topics WHERE id = $1")
+        .bind(topic_id)
+        .fetch_one(pool)
+        .await?;
 
-    let exists = result.count.unwrap_or(0) > 0;
+    let count: i64 = row.get("count");
+    let exists = count > 0;
     debug!("Topic exists: {}", exists);
     Ok(exists)
 }
@@ -548,19 +535,18 @@ pub async fn subscribe_to_topic(
     }
 
     // Insert or update subscription
-    sqlx::query!(
+    sqlx::query(
         "INSERT INTO topic_subscriptions 
         (topic_id, subscriber_token, routing_data, capabilities) 
         VALUES ($1, $2, $3, $4)
         ON CONFLICT (topic_id, subscriber_token) 
-        DO UPDATE SET routing_data = $3, last_active = NOW(), capabilities = $4",
-        topic_id,
-        subscriber_token,
-        routing_data,
-        capabilities as i16
-    )
-    .execute(pool)
-    .await?;
+        DO UPDATE SET routing_data = $3, last_active = NOW(), capabilities = $4")
+        .bind(topic_id)
+        .bind(subscriber_token)
+        .bind(routing_data)
+        .bind(capabilities as i16)
+        .execute(pool)
+        .await?;
 
     debug!("Subscription successful");
     Ok(())
@@ -578,17 +564,16 @@ pub async fn unsubscribe_from_topic(
     );
 
     // Delete the subscription
-    let result = sqlx::query!(
+    let row = sqlx::query(
         "DELETE FROM topic_subscriptions
          WHERE topic_id = $1 AND subscriber_token = $2
-         RETURNING id",
-        topic_id,
-        subscriber_token
-    )
-    .fetch_optional(pool)
-    .await?;
+         RETURNING id")
+        .bind(topic_id)
+        .bind(subscriber_token)
+        .fetch_optional(pool)
+        .await?;
 
-    let success = result.is_some();
+    let success = row.is_some();
     if success {
         debug!("Unsubscription successful");
     } else {
@@ -610,17 +595,16 @@ pub async fn force_unsubscribe_from_topic(
     );
 
     // Delete the subscription
-    let result = sqlx::query!(
+    let row = sqlx::query(
         "DELETE FROM topic_subscriptions
          WHERE topic_id = $1 AND subscriber_token = $2
-         RETURNING id",
-        topic_id,
-        subscriber_token
-    )
-    .fetch_optional(pool)
-    .await?;
+         RETURNING id")
+        .bind(topic_id)
+        .bind(subscriber_token)
+        .fetch_optional(pool)
+        .await?;
 
-    let success = result.is_some();
+    let success = row.is_some();
     if success {
         debug!("Force unsubscription successful");
     } else {
@@ -642,26 +626,25 @@ pub async fn get_subscriber(
     );
 
     // Query with explicit timestamp conversion
-    let row = sqlx::query!(
+    let row = sqlx::query(
         "SELECT routing_data, capabilities, 
          EXTRACT(EPOCH FROM join_time)::bigint as join_time,
          EXTRACT(EPOCH FROM last_active)::bigint as last_active
          FROM topic_subscriptions
-         WHERE topic_id = $1 AND subscriber_token = $2",
-        topic_id,
-        subscriber_token
-    )
-    .fetch_optional(pool)
-    .await?;
+         WHERE topic_id = $1 AND subscriber_token = $2")
+        .bind(topic_id)
+        .bind(subscriber_token)
+        .fetch_optional(pool)
+        .await?;
 
     if let Some(row) = row {
         Ok(Some(crate::topic::TopicSubscription {
             topic_id: hex::encode(topic_id),
             subscriber_token: subscriber_token.to_vec(),
-            routing_data: row.routing_data,
-            capabilities: row.capabilities as u8,
-            join_time: row.join_time.unwrap_or(0) as u64,
-            last_active: row.last_active.unwrap_or(0) as u64,
+            routing_data: row.get("routing_data"),
+            capabilities: row.get::<i16, _>("capabilities") as u8,
+            join_time: row.get::<Option<i64>, _>("join_time").unwrap_or(0) as u64,
+            last_active: row.get::<Option<i64>, _>("last_active").unwrap_or(0) as u64,
         }))
     } else {
         Ok(None)
@@ -675,16 +658,15 @@ pub async fn get_topic_subscriber_count(
 ) -> Result<usize, ServerError> {
     debug!("Getting subscriber count for topic: {}", hex::encode(topic_id));
 
-    let result = sqlx::query!(
-        "SELECT COUNT(*) as count FROM topic_subscriptions WHERE topic_id = $1",
-        topic_id
-    )
-    .fetch_one(pool)
-    .await?;
+    let row = sqlx::query(
+        "SELECT COUNT(*) as count FROM topic_subscriptions WHERE topic_id = $1")
+        .bind(topic_id)
+        .fetch_one(pool)
+        .await?;
 
-    let count = result.count.unwrap_or(0) as usize;
+    let count: i64 = row.get("count");
     debug!("Topic has {} subscribers", count);
-    Ok(count)
+    Ok(count as usize)
 }
 
 // Store a topic message
@@ -710,31 +692,35 @@ pub async fn store_topic_message(
         .unwrap_or_default()
         .as_secs();
 
+    // Start a transaction
+    let mut tx = pool.begin().await?;
+
     // Insert the message
-    sqlx::query!(
+    sqlx::query(
         "INSERT INTO topic_messages
          (id, topic_id, encrypted_content, hmac, posted_at, expiry)
-         VALUES ($1, $2, $3, $4, NOW(), to_timestamp($5))",
-        message_id,
-        topic_id,
-        encrypted_content,
-        hmac,
-        expiry_timestamp as f64
-    )
-    .execute(pool)
-    .await?;
+         VALUES ($1, $2, $3, $4, NOW(), to_timestamp($5))")
+        .bind(message_id)
+        .bind(topic_id)
+        .bind(encrypted_content)
+        .bind(hmac)
+        .bind(expiry_timestamp as f64)
+        .execute(&mut tx)
+        .await?;
 
     // Create delivery tracking entries for each subscriber
-    sqlx::query!(
+    sqlx::query(
         "INSERT INTO message_delivery (message_id, recipient_token, is_delivered)
          SELECT $1, subscriber_token, FALSE
          FROM topic_subscriptions
-         WHERE topic_id = $2",
-        message_id,
-        topic_id
-    )
-    .execute(pool)
-    .await?;
+         WHERE topic_id = $2")
+        .bind(message_id)
+        .bind(topic_id)
+        .execute(&mut tx)
+        .await?;
+
+    // Commit the transaction
+    tx.commit().await?;
 
     info!("Topic message stored successfully");
     Ok(())
@@ -751,32 +737,29 @@ pub async fn get_topic_messages(
 
     // Use a combined query with conditional filter
     let since_timestamp = since.unwrap_or(0) as f64;
-    let rows = sqlx::query!(
-        r#"
-        SELECT id, encrypted_content, 
+    let rows = sqlx::query(
+        "SELECT id, encrypted_content, 
         EXTRACT(EPOCH FROM posted_at)::bigint as posted_at,
         EXTRACT(EPOCH FROM expiry)::bigint as expiry
         FROM topic_messages
         WHERE topic_id = $1 
         AND ($2 = 0 OR posted_at > to_timestamp($2))
         ORDER BY posted_at DESC
-        LIMIT $3
-        "#,
-        topic_id,
-        since_timestamp as i32,
-        limit as i64
-    )
-    .fetch_all(pool)
-    .await?;
+        LIMIT $3")
+        .bind(topic_id)
+        .bind(since_timestamp)
+        .bind(limit as i64)
+        .fetch_all(pool)
+        .await?;
 
     let mut messages = Vec::with_capacity(rows.len());
     for row in rows {
         messages.push(TopicMessage {
-            id: hex::encode(&row.id),
+            id: hex::encode(row.get::<Vec<u8>, _>("id")),
             topic_hash: hex::encode(topic_id),
-            encrypted_content: row.encrypted_content,
-            posted_at: row.posted_at.unwrap_or(0) as u64,
-            expiry: row.expiry.unwrap_or(0) as u64,
+            encrypted_content: row.get("encrypted_content"),
+            posted_at: row.get::<Option<i64>, _>("posted_at").unwrap_or(0) as u64,
+            expiry: row.get::<Option<i64>, _>("expiry").unwrap_or(0) as u64,
         });
     }
 
@@ -796,18 +779,17 @@ pub async fn mark_topic_message_delivered(
     );
 
     // Modified query to work with or without delivery_time
-    let result = sqlx::query!(
+    let row = sqlx::query(
         "UPDATE message_delivery
          SET is_delivered = TRUE, delivery_time = NOW()
          WHERE message_id = $1 AND recipient_token = $2 AND is_delivered = FALSE
-         RETURNING id",
-        message_id,
-        subscriber_token
-    )
-    .fetch_optional(pool)
-    .await?;
+         RETURNING id")
+        .bind(message_id)
+        .bind(subscriber_token)
+        .fetch_optional(pool)
+        .await?;
 
-    let success = result.is_some();
+    let success = row.is_some();
     if success {
         debug!("Topic message marked as delivered");
     } else {
@@ -824,16 +806,15 @@ pub async fn get_topic_message_count(
 ) -> Result<usize, ServerError> {
     debug!("Getting message count for topic: {}", hex::encode(topic_id));
 
-    let result = sqlx::query!(
-        "SELECT COUNT(*) as count FROM topic_messages WHERE topic_id = $1",
-        topic_id
-    )
-    .fetch_one(pool)
-    .await?;
+    let row = sqlx::query(
+        "SELECT COUNT(*) as count FROM topic_messages WHERE topic_id = $1")
+        .bind(topic_id)
+        .fetch_one(pool)
+        .await?;
 
-    let count = result.count.unwrap_or(0) as usize;
+    let count: i64 = row.get("count");
     debug!("Topic has {} messages", count);
-    Ok(count)
+    Ok(count as usize)
 }
 
 // Get message count for a topic since a specific time
@@ -848,19 +829,18 @@ pub async fn get_topic_message_count_since(
         since
     );
 
-    let result = sqlx::query!(
+    let row = sqlx::query(
         "SELECT COUNT(*) as count 
          FROM topic_messages 
-         WHERE topic_id = $1 AND posted_at > to_timestamp($2)",
-        topic_id,
-        since as f64
-    )
-    .fetch_one(pool)
-    .await?;
+         WHERE topic_id = $1 AND posted_at > to_timestamp($2)")
+        .bind(topic_id)
+        .bind(since as f64)
+        .fetch_one(pool)
+        .await?;
 
-    let count = result.count.unwrap_or(0) as usize;
+    let count: i64 = row.get("count");
     debug!("Topic has {} messages since timestamp", count);
-    Ok(count)
+    Ok(count as usize)
 }
 
 // Create an invitation for a private topic (stub implementation)
@@ -907,37 +887,33 @@ pub async fn delete_topic(
     let mut tx = pool.begin().await?;
 
     // Delete all message delivery records
-    sqlx::query!(
+    sqlx::query(
         "DELETE FROM message_delivery
-         WHERE message_id IN (SELECT id FROM topic_messages WHERE topic_id = $1)",
-        topic_id
-    )
-    .execute(&mut tx)
-    .await?;
+         WHERE message_id IN (SELECT id FROM topic_messages WHERE topic_id = $1)")
+        .bind(topic_id)
+        .execute(&mut tx)
+        .await?;
 
     // Delete all messages
-    sqlx::query!(
-        "DELETE FROM topic_messages WHERE topic_id = $1",
-        topic_id
-    )
-    .execute(&mut tx)
-    .await?;
+    sqlx::query(
+        "DELETE FROM topic_messages WHERE topic_id = $1")
+        .bind(topic_id)
+        .execute(&mut tx)
+        .await?;
 
     // Delete all subscriptions
-    sqlx::query!(
-        "DELETE FROM topic_subscriptions WHERE topic_id = $1",
-        topic_id
-    )
-    .execute(&mut tx)
-    .await?;
+    sqlx::query(
+        "DELETE FROM topic_subscriptions WHERE topic_id = $1")
+        .bind(topic_id)
+        .execute(&mut tx)
+        .await?;
 
     // Delete the topic itself
-    sqlx::query!(
-        "DELETE FROM topics WHERE id = $1",
-        topic_id
-    )
-    .execute(&mut tx)
-    .await?;
+    sqlx::query(
+        "DELETE FROM topics WHERE id = $1")
+        .bind(topic_id)
+        .execute(&mut tx)
+        .await?;
 
     // Commit the transaction
     tx.commit().await?;
@@ -961,13 +937,12 @@ pub async fn delete_expired_topic_messages(
     debug!("Deleting expired topic messages");
 
     // Get expired message IDs
-    let message_ids = sqlx::query!(
-        "SELECT id FROM topic_messages WHERE expiry < NOW()"
-    )
-    .fetch_all(pool)
-    .await?;
+    let rows = sqlx::query(
+        "SELECT id FROM topic_messages WHERE expiry < NOW()")
+        .fetch_all(pool)
+        .await?;
 
-    if message_ids.is_empty() {
+    if rows.is_empty() {
         return Ok(0);
     }
 
@@ -977,22 +952,22 @@ pub async fn delete_expired_topic_messages(
     let mut count = 0;
     
     // Delete related delivery records and messages one by one
-    for row in &message_ids {
+    for row in &rows {
+        let id: Vec<u8> = row.get("id");
+        
         // Delete delivery records first
-        sqlx::query!(
-            "DELETE FROM message_delivery WHERE message_id = $1",
-            row.id
-        )
-        .execute(&mut tx)
-        .await?;
+        sqlx::query(
+            "DELETE FROM message_delivery WHERE message_id = $1")
+            .bind(&id)
+            .execute(&mut tx)
+            .await?;
         
         // Then delete the message
-        let result = sqlx::query!(
-            "DELETE FROM topic_messages WHERE id = $1",
-            row.id
-        )
-        .execute(&mut tx)
-        .await?;
+        let result = sqlx::query(
+            "DELETE FROM topic_messages WHERE id = $1")
+            .bind(&id)
+            .execute(&mut tx)
+            .await?;
         
         count += result.rows_affected() as usize;
     }
@@ -1028,41 +1003,38 @@ pub async fn delete_topic_messages_before(
     let mut tx = pool.begin().await?;
     
     // Combined query with conditional filter
-    let message_ids = sqlx::query!(
-        r#"
-        SELECT id FROM topic_messages 
+    let rows = sqlx::query(
+        "SELECT id FROM topic_messages 
         WHERE topic_id = $1
-        AND ($2 = 0 OR posted_at < to_timestamp($2))
-        "#,
-        topic_id,
-        timestamp as f64
-    )
-    .fetch_all(&mut tx)
-    .await?;
+        AND ($2 = 0 OR posted_at < to_timestamp($2))")
+        .bind(topic_id)
+        .bind(timestamp as f64)
+        .fetch_all(&mut tx)
+        .await?;
 
-    if message_ids.is_empty() {
+    if rows.is_empty() {
         return Ok(0);
     }
     
     let mut count = 0;
     
     // Delete related delivery records and messages one by one
-    for row in &message_ids {
+    for row in &rows {
+        let id: Vec<u8> = row.get("id");
+        
         // Delete delivery records first
-        sqlx::query!(
-            "DELETE FROM message_delivery WHERE message_id = $1",
-            row.id
-        )
-        .execute(&mut tx)
-        .await?;
+        sqlx::query(
+            "DELETE FROM message_delivery WHERE message_id = $1")
+            .bind(&id)
+            .execute(&mut tx)
+            .await?;
         
         // Then delete the message
-        let result = sqlx::query!(
-            "DELETE FROM topic_messages WHERE id = $1",
-            row.id
-        )
-        .execute(&mut tx)
-        .await?;
+        let result = sqlx::query(
+            "DELETE FROM topic_messages WHERE id = $1")
+            .bind(&id)
+            .execute(&mut tx)
+            .await?;
         
         count += result.rows_affected() as usize;
     }
