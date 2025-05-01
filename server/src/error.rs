@@ -1,3 +1,4 @@
+// server/src/error.rs
 use actix_web::{HttpResponse, ResponseError};
 use derive_more::{Display, Error};
 use sqlx::Error as SqlxError;
@@ -18,6 +19,9 @@ pub enum ServerError {
     
     #[display(fmt = "Internal server error: {}", message)]
     InternalError { message: String },
+
+    #[display(fmt = "Forbidden: {}", message)]
+    ForbiddenError { message: String },
 }
 
 impl ResponseError for ServerError {
@@ -37,6 +41,9 @@ impl ResponseError for ServerError {
             }
             ServerError::InternalError { message } => {
                 HttpResponse::InternalServerError().json(message)
+            }
+            ServerError::ForbiddenError { message } => {
+                HttpResponse::Forbidden().json(message)
             }
         }
     }

@@ -1,8 +1,5 @@
 // server/src/message.rs
-// Enhanced secure message handling with improved metadata protection
-
-use actix_web::web;
-use log::{debug, error, info, warn};
+use log::{debug, info, warn};
 use rand::{Rng, thread_rng};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -12,7 +9,7 @@ use uuid::Uuid;
 
 use crate::db;
 use crate::error::ServerError;
-use crate::models::Message;
+use crate::models::{Message};
 
 // Maximum message size allowed (10MB)
 const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
@@ -45,6 +42,16 @@ pub struct MessageContainer {
     pub hmac: Vec<u8>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct MessageStats {
+    pub total_pending: usize,
+    pub total_delivered: usize,
+    pub expired_last_day: usize,
+    pub delivered_last_day: usize,
+    pub avg_message_size: usize,
+    pub total_storage_bytes: usize,
+}
+
 pub async fn store_message(
     pool: &PgPool,
     recipient_key_hash: &[u8],
@@ -75,12 +82,8 @@ pub async fn store_message(
     hasher.update(encrypted_content);
     let hmac = hasher.finalize().to_vec();
     
-    // Calculate expiry timestamp
-    let now = SystemTime::now();
-    let now_secs = now.duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let expiry_timestamp = now_secs + expiry;
+    // Use provided priority or default to normal (5)
+    let msg_priority = priority.unwrap_or(5);
     
     // Store the message
     db::store_message(
@@ -90,7 +93,7 @@ pub async fn store_message(
         encrypted_content,
         &hmac,
         expiry,
-        priority.unwrap_or(1),
+        msg_priority,
     ).await?;
     
     // Return message ID as hex
@@ -109,7 +112,7 @@ pub async fn get_pending_messages(
     let effective_limit = limit.unwrap_or(20).min(100);
     
     // Get messages from database
-    let messages = db::get_pending_messages(pool, recipient_key_hash, effective_limit).await?;
+    let messages = db::get_pending_messages(pool, recipient_key_hash, Some(effective_limit)).await?;
     
     if !messages.is_empty() {
         info!("Retrieved {} pending messages for recipient", messages.len());
@@ -216,14 +219,4 @@ pub async fn get_message_statistics(pool: &PgPool) -> Result<MessageStats, Serve
     let stats = db::get_message_stats(pool).await?;
     
     Ok(stats)
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct MessageStats {
-    pub total_pending: usize,
-    pub total_delivered: usize,
-    pub expired_last_day: usize,
-    pub delivered_last_day: usize,
-    pub avg_message_size: usize,
-    pub total_storage_bytes: usize,
 }

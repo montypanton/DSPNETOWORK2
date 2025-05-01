@@ -1,8 +1,9 @@
+// server/src/api/topics.rs
 use actix_web::{get, post, web, HttpResponse, HttpRequest};
-use log::info;
+use log::{info, debug, warn};
 use sqlx::PgPool;
 use uuid::Uuid;
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 
 use crate::db;
 use crate::error::ServerError;
@@ -63,7 +64,7 @@ pub async fn list_topics(
     db::verify_connection_token(&pool, token).await?;
     
     // Get topics
-    let topics = db::list_topics(&pool).await?;
+    let topics = db::list_topics(&pool, true, 100, 0).await?;
     
     info!("Found {} topics", topics.len());
     
@@ -107,8 +108,11 @@ pub async fn subscribe_topic(
         });
     }
     
+    // Default capabilities (read)
+    let capabilities = 1u8;
+    
     // Subscribe to topic
-    db::subscribe_to_topic(&pool, &topic_id, &topic_req.subscriber_token, &topic_req.routing_data).await?;
+    db::subscribe_to_topic(&pool, &topic_id, &topic_req.subscriber_token, &topic_req.routing_data, capabilities).await?;
     
     info!("Subscription successful");
     
@@ -205,12 +209,20 @@ pub async fn publish_topic(
     // Default expiry to 24 hours if not specified
     let expiry = topic_req.expiry.unwrap_or(86400);
     
+    // Create HMAC for integrity
+    let mut hasher = Sha256::new();
+    hasher.update(&message_id);
+    hasher.update(&topic_id);
+    hasher.update(&topic_req.encrypted_content);
+    let hmac = hasher.finalize().to_vec();
+    
     // Store topic message
     db::store_topic_message(
         &pool,
         &topic_id,
         &message_id,
         &topic_req.encrypted_content,
+        &hmac,
         expiry,
     ).await?;
     

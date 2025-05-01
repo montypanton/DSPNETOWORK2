@@ -1,5 +1,6 @@
+// server/src/api/auth.rs
 use actix_web::{get, post, web, HttpResponse, Responder, HttpRequest};
-use log::info;
+use log::{info, debug, warn};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -20,7 +21,7 @@ pub async fn announce(
         &req.ed25519_public_key,
         &req.x25519_public_key,
         &req.kyber_public_key,
-    );
+    ).await;
     
     // Generate a unique connection token
     let connection_token = Uuid::new_v4().to_string();

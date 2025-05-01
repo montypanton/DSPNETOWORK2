@@ -1,7 +1,9 @@
+// server/src/api/messages.rs
 use actix_web::{delete, get, post, web, HttpResponse, HttpRequest};
-use log::info;
+use log::{info, debug, warn};
 use sqlx::PgPool;
 use uuid::Uuid;
+use sha2::{Digest, Sha256};
 
 use crate::db;
 use crate::error::ServerError;
@@ -53,13 +55,25 @@ pub async fn send_message(
     // Default expiry to 24 hours if not specified
     let expiry = message_req.expiry.unwrap_or(86400);
     
-    // Store message
+    // Create HMAC of content to ensure integrity
+    let mut hasher = Sha256::new();
+    hasher.update(&message_id);
+    hasher.update(&recipient_hash);
+    hasher.update(&message_req.encrypted_content);
+    let hmac = hasher.finalize().to_vec();
+    
+    // Priority (default to normal)
+    let priority = 5u8;
+    
+    // Store message with all required parameters
     db::store_message(
         &pool,
         &message_id,
         &recipient_hash,
         &message_req.encrypted_content,
+        &hmac,
         expiry,
+        priority,
     ).await?;
     
     info!("Message stored successfully with ID: {}", hex::encode(&message_id));
@@ -84,7 +98,7 @@ pub async fn get_messages(
     let public_key_hash = db::verify_connection_token(&pool, &token).await?;
     
     // Get pending messages
-    let messages = db::get_pending_messages(&pool, &public_key_hash).await?;
+    let messages = db::get_pending_messages(&pool, &public_key_hash, None).await?;
     
     info!("Found {} pending messages", messages.len());
     
