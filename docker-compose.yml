@@ -2,16 +2,18 @@ services:
   server:
     build:
       context: .
-      dockerfile: Dockerfile  # Ensure this points to our fixed Dockerfile
-    platform: linux/amd64  # Explicitly set platform for compatibility
+      dockerfile: Dockerfile  
+    platform: linux/amd64
     ports:
       - "8080:8080"
     depends_on:
-      - db
+      db:
+        condition: service_healthy
     environment:
       - DATABASE_URL=postgres://secnetuser:secnetpassword@db:5432/secnet
       - SERVER_PORT=8080
       - RUST_LOG=info
+      - SQLX_OFFLINE=true
     restart: unless-stopped
     networks:
       - secnet-network
@@ -26,7 +28,7 @@ services:
 
   db:
     image: postgres:14
-    platform: linux/amd64  # Explicitly set platform for compatibility
+    platform: linux/amd64
     environment:
       - POSTGRES_USER=secnetuser
       - POSTGRES_PASSWORD=secnetpassword
