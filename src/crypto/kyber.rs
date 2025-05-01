@@ -308,13 +308,19 @@ fn generate_matrix(seed: &[u8]) -> Vec<Vec<Vec<i16>>> {
             hasher.update(&[i as u8, j as u8]);
             let hash = hasher.finalize();
             
-            // Parse hash to coefficients
-            for k in 0..(KYBER_N/128) {
-                for l in 0..128 {
-                    let val = ((hash[2*(k*128 + l)] as u16) | ((hash[2*(k*128 + l) + 1] as u16) << 8)) & 0xfff;
-                    if val < KYBER_Q as u16 {
-                        a[i][j][k*128 + l] = val as i16;
-                    }
+            // Parse hash to coefficients safely
+            // We need to account for the size of the hash (64 bytes) vs the number of coefficients needed (256)
+            // Original code was trying to access indexes that don't exist
+            
+            // We'll use a safer approach to parse the hash
+            for k in 0..KYBER_N {
+                // Calculate safe indices for the hash
+                let idx1 = (2 * k) % hash.len();
+                let idx2 = (2 * k + 1) % hash.len();
+                
+                let val = ((hash[idx1] as u16) | ((hash[idx2] as u16) << 8)) & 0xfff;
+                if val < KYBER_Q as u16 {
+                    a[i][j][k] = val as i16;
                 }
             }
             

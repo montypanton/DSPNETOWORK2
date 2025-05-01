@@ -185,8 +185,8 @@ impl ServerConnection {
             kyber_public_key: identity.kyber.public.data.clone(),
         };
         
-        // Send request to server
-        let url = format!("{}/announce", self.config.server_url);
+        // Fixed URL: Added /api prefix
+        let url = format!("{}/api/announce", self.config.server_url);
         debug!("Sending announcement to URL: {}", url);
         
         let response = self.client
@@ -241,8 +241,8 @@ impl ServerConnection {
             prekeys: prekeys.to_vec(),
         };
         
-        // Send request to server
-        let url = format!("{}/prekeys", self.config.server_url);
+        // Fixed URL: Added /api prefix
+        let url = format!("{}/api/prekeys", self.config.server_url);
         debug!("Uploading prekeys to URL: {}", url);
         
         let response = self.client
@@ -284,8 +284,8 @@ impl ServerConnection {
             }
         };
         
-        // Send request to server
-        let url = format!("{}/prekeys/{}", self.config.server_url, peer_key_hash);
+        // Fixed URL: Added /api prefix
+        let url = format!("{}/api/prekeys/{}", self.config.server_url, peer_key_hash);
         debug!("Fetching prekeys from URL: {}", url);
         
         let response = self.client
@@ -340,8 +340,8 @@ impl ServerConnection {
             expiry: ttl.or(Some(86400)), // Default 24 hours TTL
         };
         
-        // Send request to server
-        let url = format!("{}/messages", self.config.server_url);
+        // Fixed URL: Added /api prefix
+        let url = format!("{}/api/messages", self.config.server_url);
         debug!("Sending message to URL: {}", url);
         
         let response = self.client
@@ -383,8 +383,8 @@ impl ServerConnection {
             }
         };
         
-        // Send request to server
-        let url = format!("{}/messages/{}", self.config.server_url, token);
+        // Fixed URL: Added /api prefix
+        let url = format!("{}/api/messages/{}", self.config.server_url, token);
         debug!("Fetching messages from URL: {}", url);
         
         let response = self.client
@@ -428,8 +428,8 @@ impl ServerConnection {
             }
         };
         
-        // Send request to server
-        let url = format!("{}/messages/{}", self.config.server_url, message_id);
+        // Fixed URL: Added /api prefix
+        let url = format!("{}/api/messages/{}", self.config.server_url, message_id);
         debug!("Acknowledging message at URL: {}", url);
         
         let response = self.client
@@ -467,8 +467,8 @@ impl ServerConnection {
             }
         };
         
-        // Send request to server
-        let url = format!("{}/connection/refresh", self.config.server_url);
+        // Fixed URL: Added /api prefix
+        let url = format!("{}/api/connection/refresh", self.config.server_url);
         debug!("Refreshing token at URL: {}", url);
         
         let response = self.client
@@ -517,8 +517,8 @@ impl ServerConnection {
             }
         };
         
-        // Send request to server
-        let url = format!("{}/topics", self.config.server_url);
+        // Fixed URL: Added /api prefix
+        let url = format!("{}/api/topics", self.config.server_url);
         debug!("Creating topic at URL: {}", url);
         
         let response = self.client
@@ -559,8 +559,8 @@ impl ServerConnection {
             }
         };
         
-        // Send request to server
-        let url = format!("{}/topics", self.config.server_url);
+        // Fixed URL: Added /api prefix
+        let url = format!("{}/api/topics", self.config.server_url);
         debug!("Listing topics from URL: {}", url);
         
         let response = self.client
@@ -639,8 +639,8 @@ impl ServerConnection {
             routing_data,
         };
         
-        // Send request to server
-        let url = format!("{}/topics/{}/subscribe", self.config.server_url, topic_hash);
+        // Fixed URL: Added /api prefix
+        let url = format!("{}/api/topics/{}/subscribe", self.config.server_url, topic_hash);
         debug!("Subscribing to topic at URL: {}", url);
         
         let response = self.client
@@ -679,8 +679,8 @@ impl ServerConnection {
             }
         };
         
-        // Send request to server
-        let url = format!("{}/topics/{}/unsubscribe", self.config.server_url, topic_hash);
+        // Fixed URL: Added /api prefix
+        let url = format!("{}/api/topics/{}/unsubscribe", self.config.server_url, topic_hash);
         debug!("Unsubscribing from topic at URL: {}", url);
         
         let response = self.client
@@ -726,8 +726,8 @@ impl ServerConnection {
             expiry: ttl.or(Some(86400)), // Default 24 hours TTL
         };
         
-        // Send request to server
-        let url = format!("{}/topics/{}/messages", self.config.server_url, topic_hash);
+        // Fixed URL: Added /api prefix
+        let url = format!("{}/api/topics/{}/messages", self.config.server_url, topic_hash);
         debug!("Publishing to topic at URL: {}", url);
         
         let response = self.client
@@ -779,7 +779,8 @@ impl ServerConnection {
                 interval.tick().await;
                 
                 debug!("Fetching messages in background task");
-                let url = format!("{}/messages/{}", server_url, token);
+                // Fixed URL: Added /api prefix
+                let url = format!("{}/api/messages/{}", server_url, token);
                 
                 match client.get(&url).send().await {
                     Ok(response) => {
@@ -830,7 +831,8 @@ impl ServerConnection {
         debug!("Checking server connection status");
         
         // Send a simple ping request
-        let url = format!("{}/connection/ping", self.config.server_url);
+        // Fixed URL: Added /api prefix
+        let url = format!("{}/api/connection/ping", self.config.server_url);
         
         match self.client.get(&url).send().await {
             Ok(response) => {
