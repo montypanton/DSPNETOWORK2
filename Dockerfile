@@ -14,8 +14,8 @@ RUN apt-get update && apt-get install -y \
     libc6-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Force SQLx to use offline mode
-ENV SQLX_OFFLINE=true
+# Force SQLx to use a mode
+ENV SQLX_OFFLINE=false
 
 # Build the server binary with debug info for better error messages
 WORKDIR /usr/src/secnet/server
