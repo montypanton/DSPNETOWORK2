@@ -11,7 +11,7 @@
 use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use sha3::Sha3_512;
+use sha3::Sha3_512; 
 use std::convert::TryInto;
 
 // Constants for Kyber-768 (a reasonable security level)
@@ -144,11 +144,15 @@ fn compress(poly: &[i16], d: usize) -> Vec<u8> {
             if d == 10 { // du
                 if j < 4 {
                     result[5*i + j/4*5 + j%4] = compressed & 0xff;
-                    result[5*i + j/4*5 + 4] |= ((compressed >> 8) & 0xFF) << (2*j);
+                    if compressed > 255 {
+                        result[5*i + j/4*5 + 4] |= ((compressed >> 8) & 0xFF) << (2*j);
+                    }
                 } else {
                     result[5*i + (j-4)/4*5 + (j-4)%4] |= (compressed & 0x3) << 6;
                     result[5*i + (j-4)/4*5 + (j-4)%4 + 1] = (compressed >> 2) & 0xff;
-                    result[5*i + (j-4)/4*5 + 4] |= ((compressed >> 10) & 0xFF) << (2*(j-4) + 1);
+                    if compressed > 1023 {
+                        result[5*i + (j-4)/4*5 + 4] |= ((compressed >> 10) & 0xFF) << (2*(j-4) + 1);
+                    }
                 }
             } else if d == 4 { // dv
                 result[i*4 + j/2] |= (compressed << (4*(j%2))) & 0xff;
@@ -434,7 +438,7 @@ pub fn decapsulate(secret_key: &KyberSecretKey, ciphertext: &KyberCiphertext) ->
     
     // Extract public key from secret key
     let pk_offset = KYBER_K * (KYBER_N * 12 / 8);
-    let pk_bytes = &sk_bytes[pk_offset..pk_offset + KYBER_PUBLICKEYBYTES];
+    let _pk_bytes = &sk_bytes[pk_offset..pk_offset + KYBER_PUBLICKEYBYTES];
     
     // Extract u from ciphertext
     let mut u = Vec::with_capacity(KYBER_K);

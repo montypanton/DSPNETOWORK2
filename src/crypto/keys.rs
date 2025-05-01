@@ -414,15 +414,22 @@ impl KeyManager {
         };
         
         // Generate X25519 shared secret
-        let peer_public = match <[u8; 32]>::try_from(&peer.x25519.public[..]) {
-            Ok(array) => X25519PublicKey::from(array),
-            Err(_) => {
-                error!("Invalid peer X25519 public key length");
-                return Err(KeyManagerError::InvalidKey);
-            }
-        };
+        let mut public_bytes = [0u8; 32];
+        if peer.x25519.public.len() >= 32 {
+            public_bytes.copy_from_slice(&peer.x25519.public[0..32]);
+            let peer_public = X25519PublicKey::from(public_bytes);
+            // continue with the code
+        } else {
+            error!("Invalid peer X25519 public key length");
+            return Err(KeyManagerError::InvalidKey);
+        }
         
-        let my_secret = X25519SecretKey::from(identity.x25519.secret.clone().try_into().unwrap());
+        let mut secret_bytes = [0u8; 32];
+        if identity.x25519.secret.len() >= 32 {
+            secret_bytes.copy_from_slice(&identity.x25519.secret[0..32]);
+        }
+        let my_secret = X25519SecretKey::from(secret_bytes);
+        
         let x25519_shared = my_secret.diffie_hellman(&peer_public);
         
         // Generate Kyber shared secret
@@ -597,44 +604,61 @@ impl KeyManager {
         trace!("Message length: {} bytes", message.len());
         
         // Get or create session
-        let session = if let Some(s) = self.get_session(peer_fingerprint) {
-            debug!("Using existing session for peer: {}", peer_fingerprint);
-            s.clone()
-        } else {
+        if self.get_session(peer_fingerprint).is_none() {
             debug!("No existing session, creating new one for peer: {}", peer_fingerprint);
-            self.create_session(peer_fingerprint)?.clone()
+            self.create_session(peer_fingerprint)?;
+        } else {
+            debug!("Using existing session for peer: {}", peer_fingerprint);
+        }
+        
+        // Check if ratchet is needed
+        let need_ratchet = {
+            let session = self.get_session(peer_fingerprint).unwrap();
+            session.ratchet_state.ratchet_flag
         };
         
-        // Get mutable session
-        let session = self.get_session_mut(peer_fingerprint).unwrap();
-        
-        // Implement Double Ratchet Algorithm
-        if session.ratchet_state.ratchet_flag {
-            // Ratchet forward if needed
+        // Perform ratchet if needed
+        if need_ratchet {
             self.ratchet_dh(peer_fingerprint)?;
         }
         
-        // Derive message key from chain key
-        let message_key = self.derive_message_key(&session.ratchet_state.send_chain_key, session.ratchet_state.send_count)?;
+        // Get current state
+        let (chain_key, counter, prev_counter) = {
+            let session = self.get_session(peer_fingerprint).unwrap();
+            (
+                session.ratchet_state.send_chain_key.clone(),
+                session.ratchet_state.send_count,
+                session.ratchet_state.prev_send_count
+            )
+        };
         
-        // Increment send counter
-        session.ratchet_state.send_count += 1;
+        // Derive message key
+        let message_key = self.derive_message_key(&chain_key, counter)?;
+        
+        // Increment counter and construct header
+        {
+            let session = self.get_session_mut(peer_fingerprint).unwrap();
+            session.ratchet_state.send_count += 1;
+        }
+        
+        // Get public ratchet key
+        let public_key = self.get_public_ratchet_key(peer_fingerprint)?;
+        
+        // Create header
+        let header = MessageHeader {
+            dh: public_key,
+            pn: prev_counter,
+            n: counter,
+        };
         
         // Encrypt message with message key using ChaCha20-Poly1305
-        let nonce_bytes = session.ratchet_state.send_count.to_be_bytes();
+        let nonce_bytes = counter.to_be_bytes();
         let mut nonce = [0u8; 12]; // ChaCha20-Poly1305 needs a 12-byte nonce
         nonce[8..12].copy_from_slice(&nonce_bytes);
         
         let encryption_key = Key::from_slice(&message_key);
         let cipher = ChaCha20Poly1305::new(encryption_key);
         let nonce = Nonce::from_slice(&nonce);
-        
-        // Create header with current ratchet information
-        let header = MessageHeader {
-            dh: self.get_public_ratchet_key(peer_fingerprint)?,
-            pn: session.ratchet_state.prev_send_count,
-            n: session.ratchet_state.send_count,
-        };
         
         let serialized_header = serde_json::to_vec(&header)
             .map_err(|e| KeyManagerError::EncryptionError(format!("Failed to serialize header: {}", e)))?;
@@ -662,16 +686,10 @@ impl KeyManager {
         trace!("Encrypted message length: {} bytes", encrypted_message.len());
         
         // Get session
-        let session = match self.get_session(peer_fingerprint) {
-            Some(s) => {
-                debug!("Using existing session for peer: {}", peer_fingerprint);
-                s.clone()
-            },
-            None => {
-                error!("No session found for peer: {}", peer_fingerprint);
-                return Err(KeyManagerError::KeyNotFound);
-            }
-        };
+        if self.get_session(peer_fingerprint).is_none() {
+            error!("No session found for peer: {}", peer_fingerprint);
+            return Err(KeyManagerError::KeyNotFound);
+        }
         
         // Parse encrypted message format
         if encrypted_message.len() < 4 {
@@ -694,37 +712,47 @@ impl KeyManager {
         let header: MessageHeader = serde_json::from_slice(header_bytes)
             .map_err(|e| KeyManagerError::DecryptionError(format!("Failed to deserialize header: {}", e)))?;
         
-        // Get mutable session
-        let session = self.get_session_mut(peer_fingerprint).unwrap();
-        
         // Check if we need to perform a DH ratchet step
-        let dh_ratchet_needed = match &session.ratchet_state.dh_r {
-            Some(current_remote_key) => {
-                // Compare current remote key with the one in the message
-                &header.dh != current_remote_key.as_slice()
-            },
-            None => true // No remote key, so we need to ratchet
+        let (dh_ratchet_needed, current_remote_key) = {
+            let session = self.get_session(peer_fingerprint).unwrap();
+            match &session.ratchet_state.dh_r {
+                Some(current_remote_key) => {
+                    // Compare current remote key with the one in the message
+                    (&header.dh != current_remote_key.as_slice(), current_remote_key.clone())
+                },
+                None => (true, Vec::new()) // No remote key, so we need to ratchet
+            }
         };
         
+        // Save remote key from header and perform ratchet if needed
         if dh_ratchet_needed {
             debug!("DH ratchet step needed");
             // Save current remote key from header
-            session.ratchet_state.dh_r = Some(header.dh.clone());
+            {
+                let session = self.get_session_mut(peer_fingerprint).unwrap();
+                session.ratchet_state.dh_r = Some(header.dh.clone());
+            }
             
             // Perform DH ratchet step
             self.ratchet_dh(peer_fingerprint)?;
-            
-            // Set message counter
-            session.ratchet_state.recv_count = header.n;
-        } else if header.n > session.ratchet_state.recv_count {
-            // Update receive counter if message has higher counter
-            session.ratchet_state.recv_count = header.n;
         }
         
+        // Update receive counter if needed
+        {
+            let session = self.get_session_mut(peer_fingerprint).unwrap();
+            if header.n > session.ratchet_state.recv_count {
+                session.ratchet_state.recv_count = header.n;
+            }
+        }
+        
+        // Get current chain key
+        let recv_chain_key = {
+            let session = self.get_session(peer_fingerprint).unwrap();
+            session.ratchet_state.recv_chain_key.clone().unwrap_or_default()
+        };
+        
         // Derive message key
-        let message_key = self.derive_message_key(
-            &session.ratchet_state.recv_chain_key.clone().unwrap_or_default(), 
-            header.n)?;
+        let message_key = self.derive_message_key(&recv_chain_key, header.n)?;
         
         // Decrypt message
         let nonce_bytes = header.n.to_be_bytes();
@@ -752,7 +780,7 @@ impl KeyManager {
         let mut key = chain_key.to_vec();
         
         // Derive keys in chain until we reach the desired counter
-        for i in 0..counter {
+        for _i in 0..counter {
             let mut hasher = Sha256::new();
             hasher.update(&key);
             hasher.update(&[0x01]); // Message key derivation constant
@@ -816,7 +844,8 @@ impl KeyManager {
         // Generate new ratchet key pair
         let csprng = OsRng07{};
         let new_dh_secret = X25519SecretKey::new(csprng);
-        let new_dh_public = X25519PublicKey::from(&new_dh_secret);
+        let _new_dh_public = X25519PublicKey::from(&new_dh_secret);
+
         
         // Now update the session with new keys
         {
