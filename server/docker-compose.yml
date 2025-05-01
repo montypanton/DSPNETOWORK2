@@ -36,6 +36,7 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ./server/sql/init.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./server/sql/complete-schema-fix.sql:/docker-entrypoint-initdb.d/02-schema-fix.sql
     restart: unless-stopped
     networks:
       - secnet-network

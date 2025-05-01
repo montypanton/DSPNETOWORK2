@@ -1,0 +1,13 @@
+{
+  "db": "PostgreSQL",
+  "0123456789abcdef": {
+    "describe": {
+      "columns": [],
+      "nullable": [],
+      "parameters": {
+        "Left": []
+      }
+    },
+    "query": "-- This is a placeholder for SQLx offline mode"
+  }
+}
