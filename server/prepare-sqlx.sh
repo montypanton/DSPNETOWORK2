@@ -27,7 +27,7 @@ fi
 
 # Run prepare command to create sqlx-data.json
 echo "Generating sqlx-data.json..."
-cargo sqlx prepare -- --lib
+cargo sqlx prepare --merged -- --lib
 
 echo "SQLx preparation complete!"
 echo "You can now build the project in offline mode without needing a database connection."
