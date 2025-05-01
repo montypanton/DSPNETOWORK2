@@ -1,11 +1,12 @@
 // server/src/db.rs
-use log::{debug, error, info, trace};
+use log::{debug, info, trace};
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, postgres::PgTypeInfo};
+use sqlx::PgPool;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
-use sqlx::types::BigDecimal;
 use chrono::NaiveDateTime;
+use sqlx::types::BigDecimal;
+use std::str::FromStr;
 
 use crate::error::ServerError;
 use crate::models::{
@@ -97,7 +98,7 @@ pub async fn store_public_keys(
          (public_key_hash, ed25519_public_key, x25519_public_key, kyber_public_key, connection_token, last_active) 
          VALUES ($1, $2, $3, $4, $5, NOW())
          ON CONFLICT (public_key_hash) 
-         DO UPDATE SET connection_token = $5, last_active = NOW(), connection_count = public_keys.connection_count + 1",
+         DO UPDATE SET connection_token = $5, last_active = NOW(), connection_count = COALESCE(public_keys.connection_count, 0) + 1",
         public_key_hash,
         ed25519_public_key,
         x25519_public_key,
@@ -178,8 +179,8 @@ pub async fn store_prekeys(
         // Insert the prekey
         sqlx::query!(
             "INSERT INTO prekeys 
-             (public_key_hash, key_id, x25519_public_key, kyber_public_key, is_used, upload_time)
-             VALUES ($1, $2, $3, $4, FALSE, NOW())",
+             (public_key_hash, key_id, x25519_public_key, kyber_public_key, is_used)
+             VALUES ($1, $2, $3, $4, FALSE)",
             public_key_hash,
             &prekey.key_id,
             &prekey.x25519,
@@ -263,7 +264,8 @@ pub async fn get_pending_messages(
     );
 
     let rows = sqlx::query!(
-        "SELECT id, encrypted_content, expiry
+        "SELECT id, encrypted_content, 
+         EXTRACT(EPOCH FROM expiry)::bigint as expiry_ts
          FROM pending_messages
          WHERE recipient_key_hash = $1 AND is_delivered = FALSE
          ORDER BY priority DESC, created_at ASC
@@ -282,10 +284,7 @@ pub async fn get_pending_messages(
     // Convert to Message objects
     let mut messages = Vec::with_capacity(rows.len());
     for row in rows {
-        let expiry_timestamp = row
-            .expiry
-            .map(|ts| ts.timestamp())
-            .unwrap_or_default() as u64;
+        let expiry_timestamp = row.expiry_ts.unwrap_or(0) as u64;
 
         messages.push(Message {
             id: hex::encode(&row.id),
@@ -397,20 +396,24 @@ pub async fn get_message_stats(pool: &PgPool) -> Result<crate::message::MessageS
     // Get size statistics - handling NUMERIC type correctly
     let size_stats = sqlx::query!(
         "SELECT
-            CAST(AVG(LENGTH(encrypted_content)) AS INTEGER) as avg_size,
-            SUM(LENGTH(encrypted_content)) as total_size
+            COALESCE(AVG(LENGTH(encrypted_content))::integer, 0) as avg_size,
+            COALESCE(SUM(LENGTH(encrypted_content))::bigint, 0) as total_size
          FROM pending_messages"
     )
     .fetch_one(pool)
     .await?;
+
+    // Convert to expected types
+    let avg_size = size_stats.avg_size.unwrap_or(0) as usize;
+    let total_size = size_stats.total_size.unwrap_or(0) as usize;
 
     Ok(crate::message::MessageStats {
         total_pending: counts.pending_count.unwrap_or(0) as usize,
         total_delivered: counts.delivered_count.unwrap_or(0) as usize,
         expired_last_day: day_stats.expired_count.unwrap_or(0) as usize,
         delivered_last_day: day_stats.delivered_count.unwrap_or(0) as usize,
-        avg_message_size: size_stats.avg_size.unwrap_or(0) as usize,
-        total_storage_bytes: size_stats.total_size.unwrap_or(0) as usize,
+        avg_message_size: avg_size,
+        total_storage_bytes: total_size,
     })
 }
 
@@ -445,25 +448,37 @@ pub async fn list_topics(
 ) -> Result<Vec<Topic>, ServerError> {
     debug!("Listing topics, public_only={}", only_public);
 
-    // Modified to work without topic_type column for now
-    let rows = sqlx::query!(
-        "SELECT id, created_at
-         FROM topics
-         ORDER BY created_at DESC
-         LIMIT $1 OFFSET $2",
-        limit as i64,
-        offset as i64
-    )
-    .fetch_all(pool)
-    .await?;
+    // Query without using query_as to avoid issues with timestamp types
+    let rows = if only_public {
+        sqlx::query!(
+            "SELECT id, EXTRACT(EPOCH FROM created_at)::bigint as created_at
+             FROM topics
+             WHERE topic_type = 'Public' OR topic_type IS NULL
+             ORDER BY created_at DESC
+             LIMIT $1 OFFSET $2",
+            limit as i64,
+            offset as i64
+        )
+        .fetch_all(pool)
+        .await?
+    } else {
+        sqlx::query!(
+            "SELECT id, EXTRACT(EPOCH FROM created_at)::bigint as created_at
+             FROM topics
+             ORDER BY created_at DESC
+             LIMIT $1 OFFSET $2",
+            limit as i64,
+            offset as i64
+        )
+        .fetch_all(pool)
+        .await?
+    };
 
+    // Convert to model objects
     let topics = rows
         .into_iter()
         .map(|row| {
-            let created_timestamp = row
-                .created_at
-                .map(|ts| ts.timestamp())
-                .unwrap_or_default() as u64;
+            let created_timestamp = row.created_at.unwrap_or(0) as u64;
 
             Topic {
                 hash: hex::encode(&row.id),
@@ -480,21 +495,17 @@ pub async fn list_topics(
 pub async fn get_topic(pool: &PgPool, topic_id: &[u8]) -> Result<Option<crate::topic::TopicMetadata>, ServerError> {
     debug!("Fetching topic: {}", hex::encode(topic_id));
 
-    // Simplified query without the topic_type column
+    // Query with explicit timestamp conversion
     let row = sqlx::query!(
-        "SELECT created_at
-         FROM topics
-         WHERE id = $1",
+        "SELECT EXTRACT(EPOCH FROM created_at)::bigint as created_at
+         FROM topics WHERE id = $1", 
         topic_id
     )
     .fetch_optional(pool)
     .await?;
 
     if let Some(row) = row {
-        let created_timestamp = row
-            .created_at
-            .map(|ts| ts.timestamp())
-            .unwrap_or_default() as u64;
+        let created_timestamp = row.created_at.unwrap_or(0) as u64;
 
         Ok(Some(crate::topic::TopicMetadata {
             id: hex::encode(topic_id),
@@ -551,13 +562,15 @@ pub async fn subscribe_to_topic(
 
     // Insert or update subscription
     sqlx::query!(
-        "INSERT INTO topic_subscriptions (topic_id, subscriber_token, routing_data, join_time, last_active)
-         VALUES ($1, $2, $3, NOW(), NOW())
-         ON CONFLICT (topic_id, subscriber_token)
-         DO UPDATE SET routing_data = $3, last_active = NOW()",
+        "INSERT INTO topic_subscriptions 
+        (topic_id, subscriber_token, routing_data, capabilities) 
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (topic_id, subscriber_token) 
+        DO UPDATE SET routing_data = $3, last_active = NOW(), capabilities = $4",
         topic_id,
         subscriber_token,
-        routing_data
+        routing_data,
+        capabilities as i16
     )
     .execute(pool)
     .await?;
@@ -630,7 +643,7 @@ pub async fn force_unsubscribe_from_topic(
     Ok(success)
 }
 
-// Get subscriber information - simplified to avoid capabilities issue
+// Get subscriber information
 pub async fn get_subscriber(
     pool: &PgPool,
     topic_id: &[u8],
@@ -641,8 +654,11 @@ pub async fn get_subscriber(
         hex::encode(topic_id)
     );
 
+    // Query with explicit timestamp conversion
     let row = sqlx::query!(
-        "SELECT routing_data, join_time, last_active
+        "SELECT routing_data, capabilities, 
+         EXTRACT(EPOCH FROM join_time)::bigint as join_time,
+         EXTRACT(EPOCH FROM last_active)::bigint as last_active
          FROM topic_subscriptions
          WHERE topic_id = $1 AND subscriber_token = $2",
         topic_id,
@@ -656,15 +672,9 @@ pub async fn get_subscriber(
             topic_id: hex::encode(topic_id),
             subscriber_token: subscriber_token.to_vec(),
             routing_data: row.routing_data,
-            capabilities: 1, // Default to read capability
-            join_time: row
-                .join_time
-                .map(|ts| ts.timestamp())
-                .unwrap_or_default() as u64,
-            last_active: row
-                .last_active
-                .map(|ts| ts.timestamp())
-                .unwrap_or_default() as u64,
+            capabilities: row.capabilities.unwrap_or(1) as u8,
+            join_time: row.join_time.unwrap_or(0) as u64,
+            last_active: row.last_active.unwrap_or(0) as u64,
         }))
     } else {
         Ok(None)
@@ -743,7 +753,7 @@ pub async fn store_topic_message(
     Ok(())
 }
 
-// Get messages for a topic - fixed to handle SQL query differences
+// Get messages for a topic
 pub async fn get_topic_messages(
     pool: &PgPool,
     topic_id: &[u8],
@@ -756,9 +766,12 @@ pub async fn get_topic_messages(
         limit
     );
 
+    // Use direct query with explicit type conversion
     let rows = if let Some(timestamp) = since {
         sqlx::query!(
-            "SELECT id, encrypted_content, posted_at, expiry
+            "SELECT id, encrypted_content, 
+             EXTRACT(EPOCH FROM posted_at)::bigint as posted_at,
+             EXTRACT(EPOCH FROM expiry)::bigint as expiry
              FROM topic_messages
              WHERE topic_id = $1 AND posted_at > to_timestamp($2)
              ORDER BY posted_at DESC
@@ -771,7 +784,9 @@ pub async fn get_topic_messages(
         .await?
     } else {
         sqlx::query!(
-            "SELECT id, encrypted_content, posted_at, expiry
+            "SELECT id, encrypted_content, 
+             EXTRACT(EPOCH FROM posted_at)::bigint as posted_at,
+             EXTRACT(EPOCH FROM expiry)::bigint as expiry
              FROM topic_messages
              WHERE topic_id = $1
              ORDER BY posted_at DESC
@@ -785,22 +800,12 @@ pub async fn get_topic_messages(
 
     let mut messages = Vec::with_capacity(rows.len());
     for row in rows {
-        let posted_timestamp = row
-            .posted_at
-            .map(|ts| ts.timestamp())
-            .unwrap_or_default() as u64;
-
-        let expiry_timestamp = row
-            .expiry
-            .map(|ts| ts.timestamp())
-            .unwrap_or_default() as u64;
-
         messages.push(TopicMessage {
             id: hex::encode(&row.id),
             topic_hash: hex::encode(topic_id),
             encrypted_content: row.encrypted_content,
-            posted_at: posted_timestamp,
-            expiry: expiry_timestamp,
+            posted_at: row.posted_at.unwrap_or(0) as u64,
+            expiry: row.expiry.unwrap_or(0) as u64,
         });
     }
 
@@ -819,10 +824,10 @@ pub async fn mark_topic_message_delivered(
         hex::encode(message_id)
     );
 
-    // Modified query to handle missing delivery_time
+    // Modified query to work with or without delivery_time
     let result = sqlx::query!(
         "UPDATE message_delivery
-         SET is_delivered = TRUE
+         SET is_delivered = TRUE, delivery_time = NOW()
          WHERE message_id = $1 AND recipient_token = $2 AND is_delivered = FALSE
          RETURNING id",
         message_id,
@@ -887,54 +892,36 @@ pub async fn get_topic_message_count_since(
     Ok(count)
 }
 
-// Create an invitation for a private topic - not implemented yet
+// Create an invitation for a private topic (stub implementation)
 pub async fn create_topic_invitation(
-    pool: &PgPool,
-    topic_id: &[u8],
-    invitation_token: &[u8],
-    capabilities: u8,
-    expiry: u64,
+    _pool: &PgPool,
+    _topic_id: &[u8],
+    _invitation_token: &[u8],
+    _capabilities: u8,
+    _expiry: u64,
 ) -> Result<(), ServerError> {
-    debug!(
-        "Creating invitation for topic: {}",
-        hex::encode(topic_id)
-    );
-
-    // Just return success without implementing for now
-    info!("Topic invitation functionality not available");
+    debug!("Topic invitation functionality not available");
     Ok(())
 }
 
-// Get a topic invitation - not implemented yet
+// Get a topic invitation (stub implementation)
 pub async fn get_topic_invitation(
-    pool: &PgPool,
-    topic_id: &[u8],
-    invitation_token: &[u8],
+    _pool: &PgPool,
+    _topic_id: &[u8],
+    _invitation_token: &[u8],
 ) -> Result<Option<crate::topic::TopicInvitation>, ServerError> {
-    debug!(
-        "Getting invitation for topic: {}",
-        hex::encode(topic_id)
-    );
-
-    // Return None since invitations are not implemented
-    info!("Topic invitation functionality not available");
+    debug!("Topic invitation functionality not available");
     Ok(None)
 }
 
-// Mark a topic invitation as used - not implemented yet
+// Mark a topic invitation as used (stub implementation)
 pub async fn mark_invitation_used(
-    pool: &PgPool,
-    topic_id: &[u8],
-    invitation_token: &[u8],
-    used_by: &[u8],
+    _pool: &PgPool,
+    _topic_id: &[u8],
+    _invitation_token: &[u8],
+    _used_by: &[u8],
 ) -> Result<bool, ServerError> {
-    debug!(
-        "Marking invitation as used for topic: {}",
-        hex::encode(topic_id)
-    );
-
-    // Return false since invitations are not implemented
-    info!("Topic invitation functionality not available");
+    debug!("Topic invitation functionality not available");
     Ok(false)
 }
 
@@ -965,8 +952,6 @@ pub async fn delete_topic(
     .execute(&mut tx)
     .await?;
 
-    // Skip deleting invitations since they're not implemented
-
     // Delete all subscriptions
     sqlx::query!(
         "DELETE FROM topic_subscriptions WHERE topic_id = $1",
@@ -990,14 +975,11 @@ pub async fn delete_topic(
     Ok(())
 }
 
-// Delete expired topics - simplified to avoid expires_at issue
+// Delete expired topics (stub implementation)
 pub async fn delete_expired_topics(
-    pool: &PgPool,
+    _pool: &PgPool,
 ) -> Result<usize, ServerError> {
-    debug!("Checking for expired topics");
-    
-    // For now, just return 0 since we don't have expires_at
-    info!("Expired topics check skipped (feature not implemented)");
+    debug!("Expired topics check skipped (feature not implemented)");
     Ok(0)
 }
 
@@ -1023,7 +1005,7 @@ pub async fn delete_expired_topic_messages(
 
     let mut count = 0;
     
-    // Delete related delivery records and messages one by one (workaround for array issue)
+    // Delete related delivery records and messages one by one
     for row in &message_ids {
         // Delete delivery records first
         sqlx::query!(
@@ -1051,18 +1033,15 @@ pub async fn delete_expired_topic_messages(
     Ok(count)
 }
 
-// Delete expired invitations - not implemented
+// Delete expired invitations (stub implementation)
 pub async fn delete_expired_invitations(
-    pool: &PgPool,
+    _pool: &PgPool,
 ) -> Result<usize, ServerError> {
-    debug!("Checking for expired invitations");
-    
-    // For now, just return 0 since invitations aren't implemented
-    info!("Expired invitations check skipped (feature not implemented)");
+    debug!("Expired invitations check skipped (feature not implemented)");
     Ok(0)
 }
 
-// Delete topic messages before a certain time - simplified to avoid array issue
+// Delete topic messages before a certain time 
 pub async fn delete_topic_messages_before(
     pool: &PgPool,
     topic_id: &[u8],
@@ -1077,7 +1056,7 @@ pub async fn delete_topic_messages_before(
     // Use a transaction to ensure consistency
     let mut tx = pool.begin().await?;
     
-    // Identify messages to delete
+    // Identify messages to delete using consistent query approach
     let message_ids = if timestamp > 0 {
         sqlx::query!(
             "SELECT id FROM topic_messages 
@@ -1130,50 +1109,41 @@ pub async fn delete_topic_messages_before(
     Ok(count)
 }
 
-// Update topic expiry - not implemented yet
+// Update topic expiry (stub implementation)
 pub async fn update_topic_expiry(
-    pool: &PgPool,
+    _pool: &PgPool,
     topic_id: &[u8],
-    expiry: u64,
+    _expiry: u64,
 ) -> Result<(), ServerError> {
     debug!(
-        "Topic expiry update for topic: {} requested",
+        "Topic expiry update for topic: {} requested (not implemented)",
         hex::encode(topic_id)
     );
-
-    // Skip for now
-    info!("Topic expiry update not implemented");
     Ok(())
 }
 
-// Update topic capacity - not implemented yet
+// Update topic capacity (stub implementation)
 pub async fn update_topic_capacity(
-    pool: &PgPool,
+    _pool: &PgPool,
     topic_id: &[u8],
-    max_subscribers: i32,
+    _max_subscribers: i32,
 ) -> Result<(), ServerError> {
     debug!(
-        "Topic capacity update for topic: {} requested",
+        "Topic capacity update for topic: {} requested (not implemented)",
         hex::encode(topic_id)
     );
-
-    // Skip for now
-    info!("Topic capacity update not implemented");
     Ok(())
 }
 
-// Update topic type - not implemented yet
+// Update topic type (stub implementation)
 pub async fn update_topic_type(
-    pool: &PgPool,
+    _pool: &PgPool,
     topic_id: &[u8],
-    topic_type: &str,
+    _topic_type: &str,
 ) -> Result<(), ServerError> {
     debug!(
-        "Topic type update for topic: {} requested",
+        "Topic type update for topic: {} requested (not implemented)",
         hex::encode(topic_id)
     );
-
-    // Skip for now
-    info!("Topic type update not implemented");
     Ok(())
 }

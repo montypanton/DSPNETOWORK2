@@ -29,18 +29,18 @@ if [ -z "$DB_CONTAINER" ]; then
     exit 1
 fi
 
-echo "Applying database schema fixes..."
+echo "Applying complete database schema fixes..."
 
-# Copy the schema fixes SQL file to the container
-docker cp server/sql/schema_fixes.sql ${DB_CONTAINER}:/tmp/schema_fixes.sql
+# Copy the complete schema fixes SQL file to the container
+docker cp server/sql/complete-schema-fix.sql ${DB_CONTAINER}:/tmp/complete-schema-fix.sql
 
 # Execute the SQL file inside the container
-docker exec -i ${DB_CONTAINER} psql -U secnetuser -d secnet -f /tmp/schema_fixes.sql
+docker exec -i ${DB_CONTAINER} psql -U secnetuser -d secnet -f /tmp/complete-schema-fix.sql
 
 echo "Database schema fixes applied successfully!"
 echo
 echo "Next steps:"
-echo "1. Update server/Cargo.toml to add the 'bigdecimal' feature to sqlx"
+echo "1. Make sure the Cargo.toml has the 'bigdecimal' feature for sqlx"
 echo "2. Rebuild the server with 'docker-compose build server'"
 echo "3. Restart the server with 'docker-compose up -d'"
 echo

@@ -1,11 +1,9 @@
 // server/src/topic.rs
-use actix_web::HttpResponse;
 use log::{debug, error, info, warn};
 use rand::{Rng, thread_rng};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use sqlx::PgPool;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::ServerError;
 use crate::models::{Topic, TopicMessage};
@@ -72,11 +70,11 @@ pub struct TopicInvitation {
 // Create a new anonymous topic
 pub async fn create_topic(
     pool: &PgPool,
+    _creator_token: Option<&[u8]>,
+    _expiry_seconds: Option<u64>,
+    _max_subscribers: Option<usize>,
+    _requires_auth: bool,
     topic_type: Option<TopicType>,
-    creator_token: Option<&[u8]>,
-    expiry_seconds: Option<u64>,
-    max_subscribers: Option<usize>,
-    requires_auth: bool,
 ) -> Result<String, ServerError> {
     info!("Creating new topic of type: {:?}", topic_type);
     
@@ -575,3 +573,6 @@ pub async fn admin_topic_action(
     
     Ok(())
 }
+
+// Ensure PgPool is imported
+use sqlx::PgPool;
